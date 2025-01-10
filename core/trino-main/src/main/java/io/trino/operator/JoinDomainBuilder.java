@@ -27,6 +27,8 @@ import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.ValueSet;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeOperators;
+import io.trino.sql.planner.DynamicFilterDomain;
+import org.roaringbitmap.longlong.Roaring64Bitmap;
 
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
@@ -43,12 +45,8 @@ import static io.trino.spi.function.InvocationConvention.InvocationReturnConvent
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.FLAT_RETURN;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.NULLABLE_RETURN;
 import static io.trino.spi.function.InvocationConvention.simpleConvention;
-import static io.trino.spi.predicate.Range.range;
-import static io.trino.spi.type.DoubleType.DOUBLE;
-import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.TypeUtils.isFloatingPointNaN;
-import static io.trino.spi.type.TypeUtils.readNativeValue;
-import static io.trino.spi.type.TypeUtils.writeNativeValue;
+import static io.trino.util.FastutilSetHelper.isDirectLongComparisonValidType;
 import static java.lang.Math.multiplyExact;
 import static java.nio.ByteOrder.LITTLE_ENDIAN;
 import static java.util.Objects.requireNonNull;
@@ -65,6 +63,7 @@ public class JoinDomainBuilder
     private final Type type;
 
     private final int maxDistinctValues;
+    private final int bitmapMaxDistinctValues;
     private final long maxFilterSizeInBytes;
     private final Runnable notifyStateChange;
 
@@ -76,9 +75,6 @@ public class JoinDomainBuilder
 
     private final MethodHandle identicalFlatFlat;
     private final MethodHandle identicalFlatBlock;
-
-    private final MethodHandle compareFlatFlat;
-    private final MethodHandle compareBlockBlock;
 
     private final int distinctRecordSize;
     private final int distinctRecordValueOffset;
@@ -93,30 +89,29 @@ public class JoinDomainBuilder
     private int distinctSize;
     private int distinctMaxFill;
 
-    private ValueBlock minValue;
-    private ValueBlock maxValue;
+    private Roaring64Bitmap bitmap;
 
     private boolean collectDistinctValues = true;
-    private boolean collectMinMax;
+    private boolean collectBitmap;
 
     private long retainedSizeInBytes = INSTANCE_SIZE;
 
     public JoinDomainBuilder(
             Type type,
             int maxDistinctValues,
+            int bitmapMaxDistinctValues,
             DataSize maxFilterSize,
-            boolean minMaxEnabled,
             Runnable notifyStateChange,
             TypeOperators typeOperators)
     {
         this.type = requireNonNull(type, "type is null");
 
         this.maxDistinctValues = maxDistinctValues;
+        this.bitmapMaxDistinctValues = bitmapMaxDistinctValues;
         this.maxFilterSizeInBytes = maxFilterSize.toBytes();
         this.notifyStateChange = requireNonNull(notifyStateChange, "notifyStateChange is null");
 
-        // Skipping DOUBLE and REAL in collectMinMaxValues to avoid dealing with NaN values
-        this.collectMinMax = minMaxEnabled && type.isOrderable() && type != DOUBLE && type != REAL;
+        this.collectBitmap = bitmapMaxDistinctValues > maxDistinctValues && isDirectLongComparisonValidType(type);
 
         MethodHandle readOperator = typeOperators.getReadValueOperator(type, simpleConvention(NULLABLE_RETURN, FLAT));
         readOperator = readOperator.asType(readOperator.type().changeReturnType(Object.class));
@@ -127,13 +122,11 @@ public class JoinDomainBuilder
         this.hashBlock = typeOperators.getHashCodeOperator(type, simpleConvention(FAIL_ON_NULL, VALUE_BLOCK_POSITION_NOT_NULL));
         this.identicalFlatFlat = typeOperators.getIdenticalOperator(type, simpleConvention(FAIL_ON_NULL, FLAT, FLAT));
         this.identicalFlatBlock = typeOperators.getIdenticalOperator(type, simpleConvention(FAIL_ON_NULL, FLAT, VALUE_BLOCK_POSITION_NOT_NULL));
-        if (collectMinMax) {
-            this.compareFlatFlat = typeOperators.getComparisonUnorderedLastOperator(type, simpleConvention(FAIL_ON_NULL, FLAT, FLAT));
-            this.compareBlockBlock = typeOperators.getComparisonUnorderedLastOperator(type, simpleConvention(FAIL_ON_NULL, VALUE_BLOCK_POSITION_NOT_NULL, VALUE_BLOCK_POSITION_NOT_NULL));
+        if (collectBitmap) {
+            this.bitmap = new Roaring64Bitmap();
         }
         else {
-            this.compareFlatFlat = null;
-            this.compareBlockBlock = null;
+            this.bitmap = null;
         }
 
         distinctCapacity = DEFAULT_DISTINCT_HASH_CAPACITY;
@@ -157,13 +150,13 @@ public class JoinDomainBuilder
 
     public boolean isCollecting()
     {
-        return collectMinMax || collectDistinctValues;
+        return collectBitmap || collectDistinctValues;
     }
 
     public void add(Block block)
     {
-        block = block.getLoadedBlock();
         if (collectDistinctValues) {
+            block = block.getLoadedBlock();
             switch (block) {
                 case ValueBlock valueBlock -> {
                     for (int position = 0; position < block.getPositionCount(); position++) {
@@ -180,33 +173,16 @@ public class JoinDomainBuilder
                 case LazyBlock _ -> throw new VerifyException("Did not expect LazyBlock after loading " + block.getClass().getSimpleName());
             }
 
-            // if the distinct size is too large, fall back to min max, and drop the distinct values
+            // if the distinct size is too large, fall back to bitmap, and drop the distinct values
             if (distinctSize > maxDistinctValues || getRetainedSizeInBytes() > maxFilterSizeInBytes) {
                 retainedSizeInBytes = INSTANCE_SIZE;
-                if (collectMinMax) {
-                    int minIndex = -1;
-                    int maxIndex = -1;
+                if (collectBitmap) {
                     for (int index = 0; index < distinctCapacity; index++) {
                         if (distinctControl[index] != 0) {
-                            if (minIndex == -1) {
-                                minIndex = index;
-                                maxIndex = index;
-                                continue;
-                            }
-
-                            if (valueCompare(index, minIndex) < 0) {
-                                minIndex = index;
-                            }
-                            else if (valueCompare(index, maxIndex) > 0) {
-                                maxIndex = index;
-                            }
+                            bitmap.addLong((long) readValueToObject(index));
                         }
                     }
-                    if (minIndex != -1) {
-                        minValue = readValueToBlock(minIndex);
-                        maxValue = readValueToBlock(maxIndex);
-                        retainedSizeInBytes += minValue.getRetainedSizeInBytes() + maxValue.getRetainedSizeInBytes();
-                    }
+                    retainedSizeInBytes += bitmap.getLongSizeInBytes();
                 }
                 else {
                     notifyStateChange.run();
@@ -221,67 +197,36 @@ public class JoinDomainBuilder
                 distinctMaxFill = 0;
             }
         }
-        else if (collectMinMax) {
-            int minValuePosition = -1;
-            int maxValuePosition = -1;
-
-            ValueBlock valueBlock = block.getUnderlyingValueBlock();
-            for (int i = 0; i < block.getPositionCount(); i++) {
-                int position = block.getUnderlyingValuePosition(i);
-                if (valueBlock.isNull(position)) {
-                    continue;
+        else if (collectBitmap) {
+            block = block.getLoadedBlock();
+            switch (block) {
+                case ValueBlock valueBlock -> {
+                    for (int position = 0; position < block.getPositionCount(); position++) {
+                        addToBitmap(valueBlock, position);
+                    }
                 }
-                if (minValuePosition == -1) {
-                    // First non-null value
-                    minValuePosition = position;
-                    maxValuePosition = position;
-                    continue;
+                case RunLengthEncodedBlock rleBlock -> addToBitmap(rleBlock.getValue(), 0);
+                case DictionaryBlock dictionaryBlock -> {
+                    ValueBlock dictionary = dictionaryBlock.getDictionary();
+                    for (int i = 0; i < dictionaryBlock.getPositionCount(); i++) {
+                        addToBitmap(dictionary, dictionaryBlock.getId(i));
+                    }
                 }
-                if (valueCompare(valueBlock, position, valueBlock, minValuePosition) < 0) {
-                    minValuePosition = position;
-                }
-                else if (valueCompare(valueBlock, position, valueBlock, maxValuePosition) > 0) {
-                    maxValuePosition = position;
-                }
+                case LazyBlock _ -> throw new VerifyException("Did not expect LazyBlock after loading " + block.getClass().getSimpleName());
             }
 
-            if (minValuePosition == -1) {
-                // all block values are nulls
-                return;
+            if (bitmap.getLongCardinality() > bitmapMaxDistinctValues) {
+                collectBitmap = false;
+                bitmap = null;
+                retainedSizeInBytes = INSTANCE_SIZE;
             }
-
-            if (minValue == null) {
-                minValue = valueBlock.getSingleValueBlock(minValuePosition);
-                maxValue = valueBlock.getSingleValueBlock(maxValuePosition);
-                return;
-            }
-            if (valueCompare(valueBlock, minValuePosition, minValue, 0) < 0) {
-                retainedSizeInBytes -= minValue.getRetainedSizeInBytes();
-                minValue = valueBlock.getSingleValueBlock(minValuePosition);
-                retainedSizeInBytes += minValue.getRetainedSizeInBytes();
-            }
-            if (valueCompare(valueBlock, maxValuePosition, maxValue, 0) > 0) {
-                retainedSizeInBytes -= maxValue.getRetainedSizeInBytes();
-                maxValue = valueBlock.getSingleValueBlock(maxValuePosition);
-                retainedSizeInBytes += maxValue.getRetainedSizeInBytes();
+            else {
+                retainedSizeInBytes = INSTANCE_SIZE + bitmap.getLongSizeInBytes();
             }
         }
     }
 
-    public void disableMinMax()
-    {
-        collectMinMax = false;
-        if (minValue != null) {
-            retainedSizeInBytes -= minValue.getRetainedSizeInBytes();
-            minValue = null;
-        }
-        if (maxValue != null) {
-            retainedSizeInBytes -= maxValue.getRetainedSizeInBytes();
-            maxValue = null;
-        }
-    }
-
-    public Domain build()
+    public DynamicFilterDomain build()
     {
         if (collectDistinctValues) {
             ImmutableList.Builder<Object> values = ImmutableList.builder();
@@ -295,18 +240,26 @@ public class JoinDomainBuilder
                 }
             }
             // Inner and right join doesn't match rows with null key column values.
-            return Domain.create(ValueSet.copyOf(type, values.build()), false);
+            return new DynamicFilterDomain(Domain.create(ValueSet.copyOf(type, values.build()), false));
         }
-        if (collectMinMax) {
-            if (minValue == null) {
+        if (collectBitmap) {
+            if (bitmap.isEmpty()) {
                 // all values were null
-                return Domain.none(type);
+                return DynamicFilterDomain.none(type);
             }
-            Object min = readNativeValue(type, minValue, 0);
-            Object max = readNativeValue(type, maxValue, 0);
-            return Domain.create(ValueSet.ofRanges(range(type, min, true, max, true)), false);
+            return new DynamicFilterDomain(bitmap, type, false);
         }
-        return Domain.all(type);
+        return DynamicFilterDomain.all(type);
+    }
+
+    private void addToBitmap(ValueBlock block, int position)
+    {
+        // Inner and right join doesn't match rows with null key column values.
+        if (block.isNull(position)) {
+            return;
+        }
+
+        bitmap.addLong(type.getLong(block, position));
     }
 
     private void add(ValueBlock block, int position)
@@ -532,11 +485,6 @@ public class JoinDomainBuilder
         }
     }
 
-    private ValueBlock readValueToBlock(int position)
-    {
-        return writeNativeValue(type, readValueToObject(position));
-    }
-
     private long valueHashCode(byte[] values, int position)
     {
         int recordOffset = getRecordOffset(position);
@@ -614,48 +562,6 @@ public class JoinDomainBuilder
                     leftRecordOffset + distinctRecordValueOffset,
                     leftVariableWidthChunk,
                     rightFixedRecordChunk,
-                    rightRecordOffset + distinctRecordValueOffset,
-                    rightVariableWidthChunk);
-        }
-        catch (Throwable throwable) {
-            Throwables.throwIfUnchecked(throwable);
-            throw new RuntimeException(throwable);
-        }
-    }
-
-    private int valueCompare(ValueBlock left, int leftPosition, ValueBlock right, int rightPosition)
-    {
-        try {
-            return (int) (long) compareBlockBlock.invokeExact(
-                    left,
-                    leftPosition,
-                    right,
-                    rightPosition);
-        }
-        catch (Throwable throwable) {
-            Throwables.throwIfUnchecked(throwable);
-            throw new RuntimeException(throwable);
-        }
-    }
-
-    private int valueCompare(int leftPosition, int rightPosition)
-    {
-        int leftRecordOffset = getRecordOffset(leftPosition);
-        int rightRecordOffset = getRecordOffset(rightPosition);
-
-        byte[] leftVariableWidthChunk = EMPTY_CHUNK;
-        byte[] rightVariableWidthChunk = EMPTY_CHUNK;
-        if (distinctVariableWidthData != null) {
-            leftVariableWidthChunk = distinctVariableWidthData.getChunk(distinctRecords, leftRecordOffset);
-            rightVariableWidthChunk = distinctVariableWidthData.getChunk(distinctRecords, rightRecordOffset);
-        }
-
-        try {
-            return (int) (long) compareFlatFlat.invokeExact(
-                    distinctRecords,
-                    leftRecordOffset + distinctRecordValueOffset,
-                    leftVariableWidthChunk,
-                    distinctRecords,
                     rightRecordOffset + distinctRecordValueOffset,
                     rightVariableWidthChunk);
         }

@@ -451,7 +451,7 @@ public final class FastutilSetHelper
         return new LongBitSetFilter(values, min, max);
     }
 
-    private static boolean isDirectLongComparisonValidType(Type type)
+    public static boolean isDirectLongComparisonValidType(Type type)
     {
         // Types for which we can safely use equality and hashCode on the stored long value
         // instead of going through type specific methods

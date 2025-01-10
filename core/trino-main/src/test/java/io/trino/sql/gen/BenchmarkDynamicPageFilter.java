@@ -43,10 +43,8 @@ import java.util.List;
 import java.util.Random;
 import java.util.concurrent.TimeUnit;
 
-import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.trino.jmh.Benchmarks.benchmark;
 import static io.trino.operator.project.SelectedPositions.positionsRange;
-import static io.trino.spi.predicate.Domain.DiscreteSet;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RealType.REAL;
@@ -65,10 +63,11 @@ import static org.openjdk.jmh.annotations.Scope.Thread;
 @Measurement(iterations = 10, time = 500, timeUnit = TimeUnit.MILLISECONDS)
 public class BenchmarkDynamicPageFilter
 {
-    private static final int MAX_ROWS = 200_000;
+    private static final int MAX_ROWS = 400_000;
     private static final FullConnectorSession FULL_CONNECTOR_SESSION = new FullConnectorSession(
             testSessionBuilder().build(),
             ConnectorIdentity.ofUser("test"));
+    private static final ColumnHandle COLUMN_HANDLE = new TestingColumnHandle("dummy");
 
     @Param("0.05")
     public double inputNullChance = 0.05;
@@ -121,7 +120,7 @@ public class BenchmarkDynamicPageFilter
                 }
             }
             return TupleDomain.withColumnDomains(ImmutableMap.of(
-                    new TestingColumnHandle("dummy"),
+                    COLUMN_HANDLE,
                     Domain.create(ValueSet.copyOf(type, valuesBuilder.build()), nullsAllowed)));
         }
 
@@ -132,12 +131,9 @@ public class BenchmarkDynamicPageFilter
                 long inputRows)
         {
             List<Object> nonNullValues = filter.getDomains().orElseThrow()
-                    .values().stream()
-                    .flatMap(domain -> {
-                        DiscreteSet nullableDiscreteSet = domain.getNullableDiscreteSet();
-                        return nullableDiscreteSet.getNonNullValues().stream();
-                    })
-                    .collect(toImmutableList());
+                    .get(COLUMN_HANDLE)
+                    .getNullableDiscreteSet()
+                    .getNonNullValues();
 
             // pick a random value from the filter
             return createSingleColumnData(
@@ -161,10 +157,7 @@ public class BenchmarkDynamicPageFilter
     {
         TupleDomain<ColumnHandle> filterPredicate = inputDataSet.createFilterTupleDomain(filterSize, nullsAllowed);
         inputData = inputDataSet.createInputTestData(filterPredicate, inputNullChance, nonNullsSelectivity, MAX_ROWS);
-        filterEvaluator = createDynamicFilterEvaluator(
-                filterPredicate,
-                ImmutableMap.of(new TestingColumnHandle("dummy"), 0),
-                1);
+        filterEvaluator = createDynamicFilterEvaluator(filterPredicate, ImmutableMap.of(COLUMN_HANDLE, 0));
     }
 
     @Benchmark
@@ -199,7 +192,7 @@ public class BenchmarkDynamicPageFilter
             if (blockBuilder.getPositionCount() >= batchSize) {
                 Block block = blockBuilder.build();
                 pages.add(new Page(new LazyBlock(block.getPositionCount(), () -> block)));
-                batchSize = Math.min(1024, batchSize * 2);
+                batchSize = Math.min(8192, batchSize * 2);
                 blockBuilder = type.createBlockBuilder(null, batchSize);
             }
         }
