@@ -138,7 +138,6 @@ import io.trino.sql.gen.OrderingCompiler;
 import io.trino.sql.gen.PageFunctionCompiler;
 import io.trino.sql.gen.columnar.ColumnarFilterCompiler;
 import io.trino.sql.parser.SqlParser;
-import io.trino.sql.planner.BitmapFilter;
 import io.trino.sql.planner.CompilerConfig;
 import io.trino.sql.planner.LocalExecutionPlanner;
 import io.trino.sql.planner.NodePartitioningManager;
@@ -157,7 +156,6 @@ import io.trino.type.TypeSignatureDeserializer;
 import io.trino.type.TypeSignatureKeyDeserializer;
 import io.trino.util.EmbedVersion;
 import io.trino.util.FinalizerService;
-import org.roaringbitmap.longlong.Roaring64Bitmap;
 
 import java.util.Set;
 import java.util.concurrent.Executor;
@@ -497,8 +495,6 @@ public class ServerMainModule
 
         // Dynamic Filtering
         configBinder(binder).bindConfig(DynamicFilterConfig.class);
-        jsonBinder(binder).addSerializerBinding(Roaring64Bitmap.class).to(BitmapFilter.BitmapSerializer.class);
-        jsonBinder(binder).addDeserializerBinding(Roaring64Bitmap.class).to(BitmapFilter.BitmapDeserializer.class);
 
         // dispatcher
         // TODO remove dispatcher fromm ServerMainModule, and bind dependent components only on coordinators

@@ -71,7 +71,7 @@ public class BenchmarkDynamicFilterSourceOperator
         @Param("4096")
         private int positionsPerPage = 4096;
 
-        @Param("10000")
+        @Param("1")
         private int maxDistinctValuesCount = 10_000;
 
         private ExecutorService executor;

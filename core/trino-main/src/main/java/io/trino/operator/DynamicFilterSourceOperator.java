@@ -248,7 +248,7 @@ public class DynamicFilterSourceOperator
         ImmutableMap.Builder<DynamicFilterId, DynamicFilterDomain> domainsBuilder = ImmutableMap.builder();
         for (int channelIndex = 0; channelIndex < channels.size(); ++channelIndex) {
             DynamicFilterId filterId = channels.get(channelIndex).filterId();
-            domainsBuilder.put(filterId, joinDomainBuilders[channelIndex].build().compact());
+            domainsBuilder.put(filterId, joinDomainBuilders[channelIndex].build());
         }
         dynamicPredicateConsumer.addPartition(DynamicFilterTupleDomain.withColumnDomains(domainsBuilder.buildOrThrow()));
         userMemoryContext.setBytes(0);

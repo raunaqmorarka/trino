@@ -15,26 +15,14 @@ package io.trino.sql.planner;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.fasterxml.jackson.core.Base64Variants;
-import com.fasterxml.jackson.core.JsonGenerator;
-import com.fasterxml.jackson.core.JsonParser;
-import com.fasterxml.jackson.databind.DeserializationContext;
-import com.fasterxml.jackson.databind.JsonDeserializer;
-import com.fasterxml.jackson.databind.JsonSerializer;
-import com.fasterxml.jackson.databind.SerializerProvider;
 import com.google.errorprone.annotations.DoNotCall;
+import io.airlift.slice.XxHash64;
 import io.airlift.units.DataSize;
 import io.trino.annotation.UsedByGeneratedCode;
 import io.trino.spi.block.Block;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.type.Type;
-import org.roaringbitmap.longlong.Roaring64Bitmap;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
-import java.io.DataInputStream;
-import java.io.DataOutputStream;
-import java.io.IOException;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -44,11 +32,11 @@ import static io.trino.util.FastutilSetHelper.isDirectLongComparisonValidType;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 
-public record BitmapFilter(Roaring64Bitmap roaringBitmap, Type type, boolean nullAllowed)
+public record BitmapFilter(LongBloomFilter bloomFilter, Type type, boolean nullAllowed)
 {
     public BitmapFilter
     {
-        requireNonNull(roaringBitmap, "roaringBitmap is null");
+        requireNonNull(bloomFilter, "bloomFilter is null");
         requireNonNull(type, "type is null");
         checkArgument(type.isOrderable(), "Type must be orderable");
         checkArgument(type.getJavaType() == long.class, "Type must be of long class");
@@ -56,7 +44,7 @@ public record BitmapFilter(Roaring64Bitmap roaringBitmap, Type type, boolean nul
 
     public boolean isNone()
     {
-        return roaringBitmap.isEmpty() && !nullAllowed;
+        return bloomFilter.isEmpty() && !nullAllowed;
     }
 
     @UsedByGeneratedCode
@@ -66,12 +54,12 @@ public record BitmapFilter(Roaring64Bitmap roaringBitmap, Type type, boolean nul
             return nullAllowed;
         }
         long value = type.getLong(block, position);
-        return roaringBitmap.contains(value);
+        return bloomFilter.contains(value);
     }
 
     public long getRetainedSizeInBytes()
     {
-        return roaringBitmap.getLongSizeInBytes();
+        return bloomFilter.getSizeInBytes();
     }
 
     @Override
@@ -83,40 +71,40 @@ public record BitmapFilter(Roaring64Bitmap roaringBitmap, Type type, boolean nul
         BitmapFilter that = (BitmapFilter) o;
         return nullAllowed == that.nullAllowed
                 && Objects.equals(type, that.type)
-                && Objects.equals(roaringBitmap, that.roaringBitmap);
+                && Objects.equals(bloomFilter, that.bloomFilter);
     }
 
     @Override
     public int hashCode()
     {
-        return Objects.hash(roaringBitmap, type, nullAllowed);
+        return Objects.hash(bloomFilter, type, nullAllowed);
     }
 
     @Override
     public String toString()
     {
         return format(
-                "[%s Bitmap cardinality: %s, size: %s ]",
+                "[%s Bloom filter approx cardinality: %s, size: %s ]",
                 nullAllowed ? " NULL," : "",
-                roaringBitmap.getLongCardinality(),
-                DataSize.succinctBytes(roaringBitmap.getLongSizeInBytes()));
+                bloomFilter.getMinDistinctHashes(),
+                DataSize.succinctBytes(bloomFilter.getSizeInBytes()));
     }
 
     @JsonCreator
     @DoNotCall // For JSON deserialization only
     public static BitmapFilter fromJson(
-            @JsonProperty("roaringBitmap") Roaring64Bitmap roaringBitmap,
+            @JsonProperty("bloomFilter") LongBloomFilter bloomFilter,
             @JsonProperty("type") Type type,
             @JsonProperty("nullAllowed") boolean nullAllowed)
     {
-        return new BitmapFilter(roaringBitmap, type, nullAllowed);
+        return new BitmapFilter(bloomFilter, type, nullAllowed);
     }
 
     @JsonProperty
     @Override
-    public Roaring64Bitmap roaringBitmap()
+    public LongBloomFilter bloomFilter()
     {
-        return roaringBitmap;
+        return bloomFilter;
     }
 
     @JsonProperty
@@ -139,13 +127,13 @@ public record BitmapFilter(Roaring64Bitmap roaringBitmap, Type type, boolean nul
             throw new IllegalArgumentException("bitmaps cannot be empty for union");
         }
         if (bitmaps.size() == 1) {
-            return bitmaps.get(0);
+            return bitmaps.getFirst();
         }
-        Roaring64Bitmap result = new Roaring64Bitmap();
-        for (BitmapFilter bitmap : bitmaps) {
-            result.or(bitmap.roaringBitmap());
+        LongBloomFilter result = bitmaps.getFirst().bloomFilter();
+        for (int index = 1; index < bitmaps.size(); index++) {
+            result.merge(bitmaps.get(index).bloomFilter());
         }
-        return new BitmapFilter(result, bitmaps.get(0).type(), bitmaps.stream().anyMatch(BitmapFilter::nullAllowed));
+        return new BitmapFilter(result, bitmaps.getFirst().type(), bitmaps.stream().anyMatch(BitmapFilter::nullAllowed));
     }
 
     public static Optional<BitmapFilter> fromDomain(Domain domain)
@@ -153,43 +141,146 @@ public record BitmapFilter(Roaring64Bitmap roaringBitmap, Type type, boolean nul
         if (!isDirectLongComparisonValidType(domain.getType()) || !domain.isNullableDiscreteSet()) {
             return Optional.empty();
         }
-        Roaring64Bitmap roaringBitmap = new Roaring64Bitmap();
-        for (Object value : domain.getNullableDiscreteSet().getNonNullValues()) {
-            roaringBitmap.add((long) value);
+        List<Object> values = domain.getNullableDiscreteSet().getNonNullValues();
+        LongBloomFilter bloomFilter = new LongBloomFilter();
+        for (Object value : values) {
+            bloomFilter.insert((long) value);
         }
-        roaringBitmap.runOptimize();
-        roaringBitmap.trim();
-        return Optional.of(new BitmapFilter(roaringBitmap, domain.getType(), domain.isNullAllowed()));
+        return Optional.of(new BitmapFilter(bloomFilter, domain.getType(), domain.isNullAllowed()));
     }
 
-    public static class BitmapDeserializer
-            extends JsonDeserializer<Roaring64Bitmap>
+    public static class LongBloomFilter
     {
-        @Override
-        public Roaring64Bitmap deserialize(JsonParser jsonParser, DeserializationContext ctxt)
-                throws IOException
-        {
-            byte[] data = jsonParser.getBinaryValue(Base64Variants.MIME_NO_LINEFEEDS);
-            ByteArrayInputStream bis = new ByteArrayInputStream(data);
-            DataInputStream bdi = new DataInputStream(bis);
-            Roaring64Bitmap roaringBitmap = new Roaring64Bitmap();
-            roaringBitmap.deserialize(bdi);
-            return roaringBitmap;
-        }
-    }
+        private static final int EXPECTED_NDV = 800_000;
 
-    public static class BitmapSerializer
-            extends JsonSerializer<Roaring64Bitmap>
-    {
-        @Override
-        public void serialize(Roaring64Bitmap bitmap, JsonGenerator jsonGenerator, SerializerProvider serializerProvider)
-                throws IOException
+        private final long[] bloom;
+        private final int bloomSizeMask;
+        private int minDistinctHashes;
+
+        /**
+         * A Bloom filter for a set of Slice values.
+         * This is approx 2X faster than the Bloom filter implementations in ORC and parquet because
+         * it uses single hash function and uses that to set 3 bits within a 64 bit word.
+         * The memory footprint is up to (4 * values.size()) bytes, which is much smaller than maintaining a hash set of strings.
+         */
+        public LongBloomFilter()
         {
-            ByteArrayOutputStream bos = new ByteArrayOutputStream();
-            DataOutputStream bdo = new DataOutputStream(bos);
-            bitmap.serialize(bdo);
-            byte[] data = bos.toByteArray();
-            jsonGenerator.writeBinary(Base64Variants.MIME_NO_LINEFEEDS, data, 0, data.length);
+            int bloomSize = getBloomFilterSize(EXPECTED_NDV);
+            bloom = new long[bloomSize];
+            bloomSizeMask = bloomSize - 1;
+        }
+
+        private LongBloomFilter(long[] bloom, int bloomSizeMask, int minDistinctHashes)
+        {
+            this.bloom = bloom;
+            this.bloomSizeMask = bloomSizeMask;
+            this.minDistinctHashes = minDistinctHashes;
+        }
+
+        @JsonCreator
+        @DoNotCall // For JSON deserialization only
+        public static LongBloomFilter fromJson(
+                @JsonProperty("bloom") long[] bloom,
+                @JsonProperty("bloomSizeMask") int bloomSizeMask,
+                @JsonProperty("minDistinctHashes") int minDistinctHashes)
+        {
+            return new LongBloomFilter(bloom, bloomSizeMask, minDistinctHashes);
+        }
+
+        @JsonProperty
+        @DoNotCall // For JSON serialization only
+        public long[] getBloom()
+        {
+            return bloom;
+        }
+
+        @JsonProperty
+        @DoNotCall // For JSON serialization only
+        public int getBloomSizeMask()
+        {
+            return bloomSizeMask;
+        }
+
+        @JsonProperty
+        public int getMinDistinctHashes()
+        {
+            return minDistinctHashes;
+        }
+
+        public boolean isEmpty()
+        {
+            return minDistinctHashes == 0;
+        }
+
+        public long getSizeInBytes()
+        {
+            return (long) bloom.length * Long.BYTES;
+        }
+
+        public void insert(long value)
+        {
+            long hashCode = XxHash64.hash(value);
+            long mask = bloomMask(hashCode);
+            int index = bloomIndex(hashCode);
+            if (mask == (bloom[index] & mask)) {
+                return;
+            }
+            // Set 3 bits in a 64 bit word
+            bloom[index] |= mask;
+            minDistinctHashes++;
+        }
+
+        public boolean contains(long value)
+        {
+            long hashCode = XxHash64.hash(value);
+            long mask = bloomMask(hashCode);
+            return mask == (bloom[bloomIndex(hashCode)] & mask);
+        }
+
+        public void merge(LongBloomFilter other)
+        {
+            checkArgument(bloom.length == other.bloom.length, "Bloom filters must have the same size");
+            minDistinctHashes += other.getMinDistinctHashes();
+            for (int i = 0; i < bloom.length; i++) {
+                bloom[i] |= other.bloom[i];
+            }
+        }
+
+        public void intersect(LongBloomFilter other)
+        {
+            checkArgument(bloom.length == other.bloom.length, "Bloom filters must have the same size");
+            minDistinctHashes = Math.min(minDistinctHashes, other.getMinDistinctHashes());
+            for (int i = 0; i < bloom.length; i++) {
+                bloom[i] &= other.bloom[i];
+            }
+        }
+
+        private int bloomIndex(long hashCode)
+        {
+            // Lower 21 bits are not used by bloomMask
+            // These are enough for the maximum size array that will be used here
+            return (int) (hashCode & bloomSizeMask);
+        }
+
+        private static long bloomMask(long hashCode)
+        {
+            // returned mask sets 3 bits based on portions of given hash
+            // Extract 38th to 43rd bits
+            return (1L << ((hashCode >> 21) & 63))
+                    // Extract 32nd to 37th bits
+                    | (1L << ((hashCode >> 27) & 63))
+                    // Extract 26th to 31st bits
+                    | (1L << ((hashCode >> 33) & 63));
+        }
+
+        private static int getBloomFilterSize(int valuesCount)
+        {
+            // Linear hash table size is the highest power of two less than or equal to number of values * 4. This means that the
+            // table is under half full, e.g. 127 elements gets 256 slots.
+            int hashTableSize = Integer.highestOneBit(valuesCount * 4);
+            // We will allocate 8 bits in the bloom filter for every slot in a comparable hash table.
+            // The bloomSize is a count of longs, hence / 8.
+            return Math.max(1, hashTableSize / 8);
         }
     }
 }

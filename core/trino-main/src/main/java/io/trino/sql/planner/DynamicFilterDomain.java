@@ -21,7 +21,6 @@ import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.Range;
 import io.trino.spi.predicate.ValueSet;
 import io.trino.spi.type.Type;
-import org.roaringbitmap.longlong.Roaring64Bitmap;
 
 import java.util.List;
 import java.util.Objects;
@@ -56,9 +55,9 @@ public class DynamicFilterDomain
         this(Optional.of(domain), Optional.empty());
     }
 
-    public DynamicFilterDomain(Roaring64Bitmap bitmap, Type type, boolean nullAllowed)
+    public DynamicFilterDomain(BitmapFilter.LongBloomFilter bloomFilter, Type type, boolean nullAllowed)
     {
-        this(Optional.empty(), Optional.of(new BitmapFilter(bitmap, type, nullAllowed)));
+        this(Optional.empty(), Optional.of(new BitmapFilter(bloomFilter, type, nullAllowed)));
     }
 
     public DynamicFilterDomain(BitmapFilter bitmap)
@@ -93,10 +92,7 @@ public class DynamicFilterDomain
     public Range getSpan()
     {
         return domain.map(domainValue -> domainValue.getValues().getRanges().getSpan())
-                .orElseGet(() -> {
-                    Roaring64Bitmap roaringBitmap = bitmap.orElseThrow().roaringBitmap();
-                    return Range.range(bitmap.get().type(), roaringBitmap.first(), true, roaringBitmap.last(), true);
-                });
+                .orElseGet(() -> Range.all(bitmap.orElseThrow().type()));
     }
 
     public boolean isAll()
@@ -107,15 +103,6 @@ public class DynamicFilterDomain
     public boolean isNone()
     {
         return domain.map(Domain::isNone).orElseGet(() -> bitmap.orElseThrow().isNone());
-    }
-
-    public DynamicFilterDomain compact()
-    {
-        if (bitmap.isPresent()) {
-            bitmap.get().roaringBitmap().runOptimize();
-            bitmap.get().roaringBitmap().trim();
-        }
-        return this;
     }
 
     public DynamicFilterDomain simplify(int threshold)
@@ -132,8 +119,8 @@ public class DynamicFilterDomain
             return new DynamicFilterDomain(domain.get().union(other.domain.get()));
         }
         if (bitmap.isPresent() && other.bitmap.isPresent()) {
-            Roaring64Bitmap newBitmap = bitmap.get().roaringBitmap();
-            newBitmap.or(other.bitmap.get().roaringBitmap());
+            BitmapFilter.LongBloomFilter newBitmap = bitmap.get().bloomFilter();
+            newBitmap.merge(other.bitmap.get().bloomFilter());
             return new DynamicFilterDomain(newBitmap, bitmap.get().type(), bitmap.get().nullAllowed() || other.bitmap.get().nullAllowed());
         }
         if (domain.isPresent()) {
@@ -148,8 +135,8 @@ public class DynamicFilterDomain
             return new DynamicFilterDomain(domain.get().intersect(other.domain.get()));
         }
         if (bitmap.isPresent() && other.bitmap.isPresent()) {
-            Roaring64Bitmap newBitmap = bitmap.get().roaringBitmap();
-            newBitmap.and(other.bitmap.get().roaringBitmap());
+            BitmapFilter.LongBloomFilter newBitmap = bitmap.get().bloomFilter();
+            newBitmap.intersect(other.bitmap.get().bloomFilter());
             return new DynamicFilterDomain(newBitmap, bitmap.get().type(), bitmap.get().nullAllowed() && other.bitmap.get().nullAllowed());
         }
         if (domain.isPresent()) {
@@ -166,12 +153,6 @@ public class DynamicFilterDomain
 
     public String toString(ConnectorSession connectorSession, int limit)
     {
-        if (isAll()) {
-            return "ALL";
-        }
-        if (isNone()) {
-            return "NONE";
-        }
         if (domain.isPresent()) {
             return domain.get().toString(connectorSession, limit);
         }
@@ -183,7 +164,7 @@ public class DynamicFilterDomain
         if (domain.isPresent()) {
             return new DynamicFilterDomain(Domain.create(domain.get().getValues(), true));
         }
-        return new DynamicFilterDomain(new BitmapFilter(bitmap.orElseThrow().roaringBitmap(), bitmap.orElseThrow().type(), true));
+        return new DynamicFilterDomain(new BitmapFilter(bitmap.orElseThrow().bloomFilter(), bitmap.orElseThrow().type(), true));
     }
 
     @Override
@@ -264,9 +245,9 @@ public class DynamicFilterDomain
         }
         if (domain.isNullableDiscreteSet()) {
             for (Object value : domain.getNullableDiscreteSet().getNonNullValues()) {
-                bitmap.roaringBitmap().addLong((long) value);
+                bitmap.bloomFilter().insert((long) value);
             }
-            return new DynamicFilterDomain(bitmap.roaringBitmap(), bitmap.type(), domain.isNullAllowed() || bitmap.nullAllowed());
+            return new DynamicFilterDomain(bitmap.bloomFilter(), bitmap.type(), domain.isNullAllowed() || bitmap.nullAllowed());
         }
 
         Domain bitmapSpan = fromBitmap(bitmap);
@@ -282,10 +263,10 @@ public class DynamicFilterDomain
             return new DynamicFilterDomain(bitmap);
         }
         if (domain.isNullableDiscreteSet()) {
-            Roaring64Bitmap newBitmap = new Roaring64Bitmap();
+            BitmapFilter.LongBloomFilter newBitmap = new BitmapFilter.LongBloomFilter();
             for (Object value : domain.getNullableDiscreteSet().getNonNullValues()) {
-                if (bitmap.roaringBitmap().contains((long) value)) {
-                    newBitmap.addLong((long) value);
+                if (bitmap.bloomFilter().contains((long) value)) {
+                    newBitmap.insert((long) value);
                 }
             }
             return new DynamicFilterDomain(newBitmap, bitmap.type(), domain.isNullAllowed() && bitmap.nullAllowed());
@@ -297,7 +278,7 @@ public class DynamicFilterDomain
     private static Domain fromBitmap(BitmapFilter bitmap)
     {
         return Domain.create(
-                ValueSet.ofRanges(Range.range(bitmap.type(), bitmap.roaringBitmap().first(), true, bitmap.roaringBitmap().last(), true)),
+                ValueSet.all(bitmap.type()),
                 bitmap.nullAllowed());
     }
 }

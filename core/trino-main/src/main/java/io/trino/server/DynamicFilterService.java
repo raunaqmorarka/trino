@@ -822,7 +822,7 @@ public class DynamicFilterService
                 return;
             }
 
-            DynamicFilterDomain union = DynamicFilterDomain.union(domains).compact();
+            DynamicFilterDomain union = DynamicFilterDomain.union(domains);
             // Avoid large unions with domains that exceed size limit
             if ((summaryDomainsRetainedSizeInBytes.get() - domainsRetainedSizeInBytes + union.getRetainedSizeInBytes()) > domainSizeLimitInBytes) {
                 union = union.simplify(1);

@@ -194,7 +194,7 @@ public class LocalDynamicFilterConsumer
             return;
         }
 
-        DynamicFilterTupleDomain<DynamicFilterId> union = columnWiseUnion(domains).compact();
+        DynamicFilterTupleDomain<DynamicFilterId> union = columnWiseUnion(domains);
         long unionSize = getRetainedSizeInBytes(union);
         // Avoid large unions with domains that exceed size limit
         if ((summaryDomainsRetainedSizeInBytes.get() - domainsRetainedSizeInBytes + unionSize) > domainSizeLimitInBytes) {

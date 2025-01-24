@@ -155,12 +155,6 @@ public class DynamicFilterTupleDomain<T>
         return withColumnDomains(intersected);
     }
 
-    public DynamicFilterTupleDomain<T> compact()
-    {
-        domains.ifPresent(filterDomains -> filterDomains.values().forEach(DynamicFilterDomain::compact));
-        return this;
-    }
-
     public long getRetainedSizeInBytes(ToLongFunction<T> keySize)
     {
         return INSTANCE_SIZE

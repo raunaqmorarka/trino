@@ -27,8 +27,8 @@ import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.ValueSet;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeOperators;
+import io.trino.sql.planner.BitmapFilter;
 import io.trino.sql.planner.DynamicFilterDomain;
-import org.roaringbitmap.longlong.Roaring64Bitmap;
 
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
@@ -89,7 +89,7 @@ public class JoinDomainBuilder
     private int distinctSize;
     private int distinctMaxFill;
 
-    private Roaring64Bitmap bitmap;
+    private BitmapFilter.LongBloomFilter bitmap;
 
     private boolean collectDistinctValues = true;
     private boolean collectBitmap;
@@ -123,7 +123,7 @@ public class JoinDomainBuilder
         this.identicalFlatFlat = typeOperators.getIdenticalOperator(type, simpleConvention(FAIL_ON_NULL, FLAT, FLAT));
         this.identicalFlatBlock = typeOperators.getIdenticalOperator(type, simpleConvention(FAIL_ON_NULL, FLAT, VALUE_BLOCK_POSITION_NOT_NULL));
         if (collectBitmap) {
-            this.bitmap = new Roaring64Bitmap();
+            this.bitmap = new BitmapFilter.LongBloomFilter();
         }
         else {
             this.bitmap = null;
@@ -179,10 +179,10 @@ public class JoinDomainBuilder
                 if (collectBitmap) {
                     for (int index = 0; index < distinctCapacity; index++) {
                         if (distinctControl[index] != 0) {
-                            bitmap.addLong((long) readValueToObject(index));
+                            bitmap.insert((long) readValueToObject(index));
                         }
                     }
-                    retainedSizeInBytes += bitmap.getLongSizeInBytes();
+                    retainedSizeInBytes += bitmap.getSizeInBytes();
                 }
                 else {
                     notifyStateChange.run();
@@ -215,13 +215,13 @@ public class JoinDomainBuilder
                 case LazyBlock _ -> throw new VerifyException("Did not expect LazyBlock after loading " + block.getClass().getSimpleName());
             }
 
-            if (bitmap.getLongCardinality() > bitmapMaxDistinctValues) {
+            if (bitmap.getMinDistinctHashes() > bitmapMaxDistinctValues) {
                 collectBitmap = false;
                 bitmap = null;
                 retainedSizeInBytes = INSTANCE_SIZE;
             }
             else {
-                retainedSizeInBytes = INSTANCE_SIZE + bitmap.getLongSizeInBytes();
+                retainedSizeInBytes = INSTANCE_SIZE + bitmap.getSizeInBytes();
             }
         }
     }
@@ -259,7 +259,7 @@ public class JoinDomainBuilder
             return;
         }
 
-        bitmap.addLong(type.getLong(block, position));
+        bitmap.insert(type.getLong(block, position));
     }
 
     private void add(ValueBlock block, int position)
