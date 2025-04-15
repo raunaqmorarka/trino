@@ -72,6 +72,7 @@ public class ScanFilterAndProjectOperator
 {
     private final WorkProcessor<Page> pages;
     private final PageProcessorMetrics pageProcessorMetrics = new PageProcessorMetrics();
+    private final LocalMemoryContext memoryContext;
 
     @Nullable
     private RecordCursor cursor;
@@ -101,6 +102,7 @@ public class ScanFilterAndProjectOperator
             DataSize minOutputPageSize,
             int minOutputPageRowCount)
     {
+        memoryContext = memoryTrackingContext.aggregateUserMemoryContext().newLocalMemoryContext(ScanFilterAndProjectOperator.class.getSimpleName());
         pages = split.flatTransform(
                 new SplitToPages(
                         session,
@@ -112,7 +114,7 @@ public class ScanFilterAndProjectOperator
                         columns,
                         dynamicFilter,
                         types,
-                        memoryTrackingContext.aggregateUserMemoryContext(),
+                        memoryContext,
                         minOutputPageSize,
                         minOutputPageRowCount));
     }
@@ -180,11 +182,12 @@ public class ScanFilterAndProjectOperator
         if (pageSource != null) {
             try {
                 pageSource.close();
-                metrics = pageSource.getMetrics();
             }
             catch (IOException e) {
                 throw new UncheckedIOException(e);
             }
+            metrics = pageSource.getMetrics();
+            memoryContext.setBytes(pageSource.getMemoryUsage());
         }
         else if (cursor != null) {
             cursor.close();
@@ -220,7 +223,7 @@ public class ScanFilterAndProjectOperator
                 Iterable<ColumnHandle> columns,
                 DynamicFilter dynamicFilter,
                 Iterable<Type> types,
-                AggregatedMemoryContext aggregatedMemoryContext,
+                LocalMemoryContext memoryContext,
                 DataSize minOutputPageSize,
                 int minOutputPageRowCount)
         {
@@ -233,7 +236,7 @@ public class ScanFilterAndProjectOperator
             this.columns = ImmutableList.copyOf(requireNonNull(columns, "columns is null"));
             this.dynamicFilter = requireNonNull(dynamicFilter, "dynamicFilter is null");
             this.types = ImmutableList.copyOf(requireNonNull(types, "types is null"));
-            this.memoryContext = aggregatedMemoryContext.newLocalMemoryContext(ScanFilterAndProjectOperator.class.getSimpleName());
+            this.memoryContext = requireNonNull(memoryContext, "memoryContext is null");
             this.localAggregatedMemoryContext = newSimpleAggregatedMemoryContext();
             this.pageSourceMemoryContext = localAggregatedMemoryContext.newLocalMemoryContext(ScanFilterAndProjectOperator.class.getSimpleName());
             this.outputMemoryContext = localAggregatedMemoryContext.newLocalMemoryContext(ScanFilterAndProjectOperator.class.getSimpleName());
