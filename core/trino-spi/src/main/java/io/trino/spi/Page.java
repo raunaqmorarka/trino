@@ -213,12 +213,12 @@ public final class Page
     @Override
     public String toString()
     {
-        StringBuilder builder = new StringBuilder("Page{");
-        builder.append("positions=").append(positionCount);
-        builder.append(", channels=").append(getChannelCount());
-        builder.append('}');
-        builder.append("@").append(Integer.toHexString(System.identityHashCode(this)));
-        return builder.toString();
+        return "Page{" + "positions=" + positionCount +
+                ", channels=" + getChannelCount() +
+                ", sizeInBytes=" + getSizeInBytes() +
+                ", blocks=" + Arrays.toString(blocks) +
+                '}' +
+                "@" + Integer.toHexString(System.identityHashCode(this));
     }
 
     private static int determinePositionCount(Block... blocks)

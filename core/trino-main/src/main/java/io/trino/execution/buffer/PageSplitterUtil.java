@@ -14,6 +14,7 @@
 package io.trino.execution.buffer;
 
 import com.google.common.collect.ImmutableList;
+import io.airlift.log.Logger;
 import io.airlift.slice.Slice;
 import io.trino.spi.Page;
 
@@ -23,6 +24,7 @@ import static com.google.common.base.Preconditions.checkArgument;
 
 public final class PageSplitterUtil
 {
+    private static final Logger log = Logger.get(PageSplitterUtil.class);
     private static final int PAGE_SPLIT_THRESHOLD_IN_BYTES = 2 * 1024 * 1024;
 
     private PageSplitterUtil() {}
@@ -55,6 +57,7 @@ public final class PageSplitterUtil
             return ImmutableList.of(page);
         }
 
+        log.info("Splitting page %s", page);
         ImmutableList.Builder<Page> outputPages = ImmutableList.builder();
         long previousSize = page.getSizeInBytes();
         int positionCount = page.getPositionCount();
