@@ -43,7 +43,7 @@ public class TestRowBlockBuilder
 
     private static BlockBuilder blockBuilder()
     {
-        return new RowBlockBuilder(ImmutableList.of(BIGINT), null, 10);
+        return new RowBlockBuilder(ImmutableList.of(BIGINT), 10);
     }
 
     private static void assertIsAllNulls(Block block, int expectedPositionCount)
@@ -64,7 +64,7 @@ public class TestRowBlockBuilder
     @Override
     protected BlockBuilder createBlockBuilder()
     {
-        return new RowBlockBuilder(List.of(VARCHAR, INTEGER, BOOLEAN), null, 1);
+        return new RowBlockBuilder(List.of(VARCHAR, INTEGER, BOOLEAN), 1);
     }
 
     @Override
@@ -87,7 +87,7 @@ public class TestRowBlockBuilder
     @Override
     protected ValueBlock blockFromValues(Iterable<TestRow> values)
     {
-        RowBlockBuilder blockBuilder = new RowBlockBuilder(List.of(VARCHAR, INTEGER, BOOLEAN), null, 1);
+        RowBlockBuilder blockBuilder = new RowBlockBuilder(List.of(VARCHAR, INTEGER, BOOLEAN), 1);
         for (TestRow row : values) {
             if (row == null) {
                 blockBuilder.appendNull();

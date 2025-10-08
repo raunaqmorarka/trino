@@ -62,7 +62,7 @@ public final class ArrayExceptFunction
         for (int i = 0; i < rightPositionCount; i++) {
             set.add(rightArray, i);
         }
-        BlockBuilder distinctElementBlockBuilder = type.createBlockBuilder(null, leftPositionCount);
+        BlockBuilder distinctElementBlockBuilder = type.createBlockBuilder(leftPositionCount);
         for (int i = 0; i < leftPositionCount; i++) {
             if (set.add(leftArray, i)) {
                 type.appendTo(leftArray, i, distinctElementBlockBuilder);

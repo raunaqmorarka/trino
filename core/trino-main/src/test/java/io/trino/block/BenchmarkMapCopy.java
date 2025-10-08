@@ -78,7 +78,7 @@ public class BenchmarkMapCopy
         public void setup()
         {
             MapType mapType = mapType(VARCHAR, BIGINT);
-            blockBuilder = mapType.createBlockBuilder(null, POSITIONS);
+            blockBuilder = mapType.createBlockBuilder(POSITIONS);
             for (int position = 0; position < POSITIONS; position++) {
                 blockBuilder.buildEntry((keyBuilder, valueBuilder) -> {
                     for (int i = 0; i < mapSize; i++) {
@@ -98,7 +98,7 @@ public class BenchmarkMapCopy
 
         public BlockBuilder getBlockBuilder()
         {
-            return blockBuilder.newBlockBuilderLike(null);
+            return blockBuilder.newBlockBuilderLike();
         }
     }
 

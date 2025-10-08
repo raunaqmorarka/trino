@@ -63,12 +63,12 @@ public class PageBuilder
 
     private PageBuilder(int initialExpectedEntries, int maxPageBytes, List<? extends Type> types)
     {
-        pageBuilderStatus = new PageBuilderStatus(maxPageBytes);
+        pageBuilderStatus = new PageBuilderStatus(maxPageBytes, this::getCurrentSizeInBytes);
 
         // Stream API should not be used since constructor can be called in performance sensitive sections
         blockBuilders = new BlockBuilder[types.size()];
         for (int i = 0; i < blockBuilders.length; i++) {
-            blockBuilders[i] = types.get(i).createBlockBuilder(pageBuilderStatus.createBlockBuilderStatus(), initialExpectedEntries);
+            blockBuilders[i] = types.get(i).createBlockBuilder(initialExpectedEntries);
         }
     }
 
@@ -77,12 +77,12 @@ public class PageBuilder
         if (isEmpty()) {
             return;
         }
-        pageBuilderStatus = new PageBuilderStatus(pageBuilderStatus.getMaxPageSizeInBytes());
+        pageBuilderStatus = new PageBuilderStatus(pageBuilderStatus.getMaxPageSizeInBytes(), this::getCurrentSizeInBytes);
 
         declaredPositions = 0;
 
         for (int i = 0; i < blockBuilders.length; i++) {
-            blockBuilders[i] = blockBuilders[i].newBlockBuilderLike(pageBuilderStatus.createBlockBuilderStatus());
+            blockBuilders[i] = blockBuilders[i].newBlockBuilderLike();
         }
     }
 
@@ -119,7 +119,7 @@ public class PageBuilder
 
     public boolean isFull()
     {
-        return declaredPositions == Integer.MAX_VALUE || pageBuilderStatus.isFull();
+        return declaredPositions == Integer.MAX_VALUE || pageBuilderStatus.isFull(declaredPositions);
     }
 
     public boolean isEmpty()
@@ -163,5 +163,14 @@ public class PageBuilder
         }
 
         return Page.wrapBlocksWithoutCopy(declaredPositions, blocks);
+    }
+
+    private long getCurrentSizeInBytes()
+    {
+        long totalSizeInBytes = 0;
+        for (BlockBuilder blockBuilder : blockBuilders) {
+            totalSizeInBytes += blockBuilder.getSizeInBytes();
+        }
+        return totalSizeInBytes;
     }
 }

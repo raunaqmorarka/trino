@@ -128,7 +128,7 @@ public class BenchmarkArrayDistinct
 
         private static Block createChannel(int positionCount, int arraySize, ArrayType arrayType)
         {
-            ArrayBlockBuilder blockBuilder = arrayType.createBlockBuilder(null, positionCount);
+            ArrayBlockBuilder blockBuilder = arrayType.createBlockBuilder(positionCount);
             for (int position = 0; position < positionCount; position++) {
                 blockBuilder.buildEntry(elementBuilder -> {
                     for (int i = 0; i < arraySize; i++) {
@@ -178,7 +178,7 @@ public class BenchmarkArrayDistinct
         }
 
         BlockSet set = new BlockSet(VARCHAR, DISTINCT_FROM_OPERATOR, HASH_CODE_OPERATOR, array.getPositionCount());
-        BlockBuilder distinctElementBlockBuilder = VARCHAR.createBlockBuilder(null, array.getPositionCount());
+        BlockBuilder distinctElementBlockBuilder = VARCHAR.createBlockBuilder(array.getPositionCount());
         for (int i = 0; i < array.getPositionCount(); i++) {
             if (set.add(array, i)) {
                 VARCHAR.appendTo(array, i, distinctElementBlockBuilder);

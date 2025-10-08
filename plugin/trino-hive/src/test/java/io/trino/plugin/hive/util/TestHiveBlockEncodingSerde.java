@@ -78,7 +78,7 @@ public class TestHiveBlockEncodingSerde
     {
         Slice serialized;
         try (SliceOutput sliceOutput = new DynamicSliceOutput(0)) {
-            Block block = type.createBlockBuilder(null, 0).build();
+            Block block = type.createBlockBuilder(0).build();
             new HiveBlockEncodingSerde().writeBlock(sliceOutput, block);
             serialized = sliceOutput.slice();
         }

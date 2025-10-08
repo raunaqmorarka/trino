@@ -13,6 +13,8 @@
  */
 package io.trino.spi.block;
 
+import java.util.function.Supplier;
+
 import static io.airlift.slice.SizeOf.instanceSize;
 
 public class PageBuilderStatus
@@ -22,22 +24,15 @@ public class PageBuilderStatus
     public static final int DEFAULT_MAX_PAGE_SIZE_IN_BYTES = 1024 * 1024;
 
     private final int maxPageSizeInBytes;
+    private final Supplier<Long> currentSizeSupplier;
 
     private long currentSize;
+    private long positionsCountAtCurrentSize;
 
-    public PageBuilderStatus()
-    {
-        this(DEFAULT_MAX_PAGE_SIZE_IN_BYTES);
-    }
-
-    public PageBuilderStatus(int maxPageSizeInBytes)
+    public PageBuilderStatus(int maxPageSizeInBytes, Supplier<Long> currentSizeSupplier)
     {
         this.maxPageSizeInBytes = maxPageSizeInBytes;
-    }
-
-    public BlockBuilderStatus createBlockBuilderStatus()
-    {
-        return new BlockBuilderStatus(this);
+        this.currentSizeSupplier = currentSizeSupplier;
     }
 
     public int getMaxPageSizeInBytes()
@@ -50,17 +45,13 @@ public class PageBuilderStatus
         return currentSize == 0;
     }
 
-    public boolean isFull()
+    public boolean isFull(int declaredPositions)
     {
-        return currentSize >= maxPageSizeInBytes;
-    }
-
-    void addBytes(int bytes)
-    {
-        if (bytes < 0) {
-            throw new IllegalArgumentException("bytes cannot be negative");
+        if (declaredPositions - positionsCountAtCurrentSize >= 1024) {
+            positionsCountAtCurrentSize = declaredPositions;
+            currentSize = currentSizeSupplier.get();
         }
-        currentSize += bytes;
+        return currentSize >= maxPageSizeInBytes;
     }
 
     public long getSizeInBytes()

@@ -124,7 +124,7 @@ public class BenchmarkArraySort
 
         private static Block createChannel(int positionCount, int arraySize, ArrayType arrayType)
         {
-            ArrayBlockBuilder blockBuilder = arrayType.createBlockBuilder(null, positionCount);
+            ArrayBlockBuilder blockBuilder = arrayType.createBlockBuilder(positionCount);
             for (int position = 0; position < positionCount; position++) {
                 blockBuilder.buildEntry(elementBuilder -> {
                     for (int i = 0; i < arraySize; i++) {
@@ -181,7 +181,7 @@ public class BenchmarkArraySort
             return (int) VARCHAR_COMPARISON.compare(block, p1, block, p2);
         });
 
-        BlockBuilder blockBuilder = VARCHAR.createBlockBuilder(null, block.getPositionCount());
+        BlockBuilder blockBuilder = VARCHAR.createBlockBuilder(block.getPositionCount());
 
         for (int position : positions) {
             VARCHAR.appendTo(block, position, blockBuilder);
