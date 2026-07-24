@@ -179,8 +179,11 @@
             -XX:+UnlockDiagnosticVMOptions
             ${extraJavaVectorArgs}
             --sun-misc-unsafe-memory-access=allow
+            --enable-native-access=ALL-UNNAMED
             <!-- # Disable superfluous bootstrap logging in tests -->
             -Dairlift.quiet=true
+            <!-- # Multi-node test servers share the virtual thread carriers of one JVM -->
+            -Djdk.virtualThreadScheduler.parallelism=32
         </air.test.jvm.additional-arguments.default>
         <air.test.jvm.additional-arguments>${air.test.jvm.additional-arguments.default}</air.test.jvm.additional-arguments>
 
@@ -648,6 +651,12 @@
                 <groupId>io.airlift</groupId>
                 <artifactId>units</artifactId>
                 <version>1.13</version>
+            </dependency>
+
+            <dependency>
+                <groupId>io.airlift</groupId>
+                <artifactId>vthreadtime</artifactId>
+                <version>1.1</version>
             </dependency>
 
             <dependency>
