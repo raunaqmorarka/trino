@@ -24,6 +24,7 @@ import com.google.inject.Inject;
 import io.airlift.concurrent.ThreadPoolExecutorMBean;
 import io.airlift.log.Logger;
 import io.airlift.units.Duration;
+import io.airlift.vthreadtime.VirtualThreadTime;
 import io.opentelemetry.api.trace.Tracer;
 import io.trino.execution.SplitRunner;
 import io.trino.execution.SplitRunner.BlockedReason;
@@ -118,11 +119,35 @@ public class ThreadPerDriverTaskExecutor
     {
         this(tracer,
                 versionEmbedder,
-                new FairScheduler(config.getMaxWorkerThreads(), "SplitRunner-%d", Ticker.systemTicker()),
+                new FairScheduler(
+                        config.getMaxWorkerThreads(),
+                        "SplitRunner-%d",
+                        Ticker.systemTicker(),
+                        useVirtualThreads(config)),
                 config.getMinDriversPerTask(),
                 config.getMaxDriversPerTask(),
                 config.getMinDrivers(),
                 config.isIdleLeafSplitAdmissionEnabled());
+    }
+
+    private static boolean useVirtualThreads(TaskManagerConfig config)
+    {
+        if (!config.isThreadPerDriverSchedulerVirtualThreadsEnabled()) {
+            return false;
+        }
+        int carriers = FairScheduler.virtualThreadCarriers();
+        if (carriers < 2) {
+            LOG.warn("Running splits on platform threads because virtual threads need at least two carrier threads, but there are %s. Set experimental.thread-per-driver-scheduler-virtual-threads-enabled=false to silence this warning.", carriers);
+            return false;
+        }
+        try {
+            VirtualThreadTime.initialize();
+            return true;
+        }
+        catch (UnsupportedOperationException e) {
+            LOG.warn(e, "Running splits on platform threads because virtual thread CPU timing is not supported. Set experimental.thread-per-driver-scheduler-virtual-threads-enabled=false to silence this warning.");
+            return false;
+        }
     }
 
     @VisibleForTesting
