@@ -18,7 +18,9 @@ import io.opentelemetry.api.trace.Tracer;
 import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.metastore.HiveMetastore;
 import io.trino.metastore.HiveMetastoreFactory;
+import io.trino.metastore.cache.CachingHiveMetastoreConfig;
 import io.trino.metastore.tracing.TracingHiveMetastore;
+import io.trino.spi.Node;
 import io.trino.spi.catalog.CatalogName;
 import io.trino.spi.security.ConnectorIdentity;
 
@@ -36,6 +38,8 @@ public class GlueHiveMetastoreFactory
     public GlueHiveMetastoreFactory(
             GlueHiveMetastore metastore,
             GlueHiveMetastoreConfig config,
+            CachingHiveMetastoreConfig cachingConfig,
+            Node currentNode,
             TrinoFileSystemFactory fileSystemFactory,
             CatalogName catalogName,
             Set<GlueHiveMetastore.TableKind> visibleTableKinds,
@@ -47,7 +51,7 @@ public class GlueHiveMetastoreFactory
                     config.getSchemaMappingRules().get(),
                     Optional.of(metastore),
                     config,
-                    _ -> GlueCache.NOOP,
+                    prefix -> GlueMetastoreModule.createGlueCache(cachingConfig, new CatalogName(catalogName + "-" + prefix), currentNode),
                     fileSystemFactory,
                     catalogName,
                     visibleTableKinds);
