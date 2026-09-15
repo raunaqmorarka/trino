@@ -430,6 +430,7 @@ public class HiveMetadata
     private final long maxPartitionDropsPerQuery;
     private final HiveTimestampPrecision hiveViewsTimestampPrecision;
     private final Executor metadataFetchingExecutor;
+    private final SchemaMappingPrefixes schemaMappingPrefixes;
 
     public HiveMetadata(
             CatalogName catalogName,
@@ -457,7 +458,8 @@ public class HiveMetadata
             boolean allowTableRename,
             long maxPartitionDropsPerQuery,
             HiveTimestampPrecision hiveViewsTimestampPrecision,
-            Executor metadataFetchingExecutor)
+            Executor metadataFetchingExecutor,
+            SchemaMappingPrefixes schemaMappingPrefixes)
     {
         this.catalogName = requireNonNull(catalogName, "catalogName is null");
         this.metastore = requireNonNull(metastore, "metastore is null");
@@ -485,6 +487,7 @@ public class HiveMetadata
         this.maxPartitionDropsPerQuery = maxPartitionDropsPerQuery;
         this.hiveViewsTimestampPrecision = requireNonNull(hiveViewsTimestampPrecision, "hiveViewsTimestampPrecision is null");
         this.metadataFetchingExecutor = requireNonNull(metadataFetchingExecutor, "metadataFetchingExecutor is null");
+        this.schemaMappingPrefixes = requireNonNull(schemaMappingPrefixes, "schemaMappingPrefixes is null");
     }
 
     @Override
@@ -2980,7 +2983,7 @@ public class HiveMetadata
                         return Optional.empty();
                     }
 
-                    ConnectorViewDefinition definition = createViewReader(metastore, session, view, typeManager, this::redirectTable, metadataProvider, hiveViewsRunAsInvoker, hiveViewsTimestampPrecision)
+                    ConnectorViewDefinition definition = createViewReader(metastore, session, view, typeManager, this::redirectTable, metadataProvider, hiveViewsRunAsInvoker, hiveViewsTimestampPrecision, schemaMappingPrefixes)
                             .decodeViewData(view.getViewOriginalText(), view, catalogName);
                     // use owner field from table metadata if it exists
                     if (view.getOwner().isPresent() && !definition.isRunAsInvoker()) {
