@@ -82,20 +82,28 @@ public final class ViewReaderUtil
             BiFunction<ConnectorSession, SchemaTableName, Optional<CatalogSchemaTableName>> tableRedirectionResolver,
             MetadataProvider metadataProvider,
             boolean runHiveViewRunAsInvoker,
-            HiveTimestampPrecision hiveViewsTimestampPrecision)
+            HiveTimestampPrecision hiveViewsTimestampPrecision,
+            SchemaMappingPrefixes schemaMappingPrefixes)
     {
+        String schemaName = table.getDatabaseName();
         if (isTrinoView(table)) {
-            return new PrestoViewReader();
+            return SchemaMappingViewReader.wrap(new PrestoViewReader(), schemaMappingPrefixes, schemaName);
         }
         if (isHiveViewsLegacyTranslation(session)) {
-            return new LegacyHiveViewReader(runHiveViewRunAsInvoker);
+            return SchemaMappingViewReader.wrap(new LegacyHiveViewReader(runHiveViewRunAsInvoker), schemaMappingPrefixes, schemaName);
         }
 
-        return new HiveViewReader(
-                new CoralSemiTransactionalHiveMSCAdapter(metastore, coralTableRedirectionResolver(session, tableRedirectionResolver, metadataProvider)),
-                typeManager,
-                runHiveViewRunAsInvoker,
-                hiveViewsTimestampPrecision);
+        return SchemaMappingViewReader.wrap(
+                new HiveViewReader(
+                        SchemaMappingViewReader.coralClient(
+                                new CoralSemiTransactionalHiveMSCAdapter(metastore, coralTableRedirectionResolver(session, tableRedirectionResolver, metadataProvider)),
+                                schemaMappingPrefixes,
+                                schemaName),
+                        typeManager,
+                        runHiveViewRunAsInvoker,
+                        hiveViewsTimestampPrecision),
+                schemaMappingPrefixes,
+                schemaName);
     }
 
     private static CoralTableRedirectionResolver coralTableRedirectionResolver(

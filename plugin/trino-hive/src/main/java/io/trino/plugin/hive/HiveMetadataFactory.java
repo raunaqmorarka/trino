@@ -80,6 +80,7 @@ public class HiveMetadataFactory
     private final boolean allowTableRename;
     private final HiveTimestampPrecision hiveViewsTimestampPrecision;
     private final Executor metadataFetchingExecutor;
+    private final SchemaMappingPrefixes schemaMappingPrefixes;
 
     @Inject
     public HiveMetadataFactory(
@@ -102,7 +103,8 @@ public class HiveMetadataFactory
             DirectoryLister directoryLister,
             TransactionScopeCachingDirectoryListerFactory transactionScopeCachingDirectoryListerFactory,
             @UsingSystemSecurity boolean usingSystemSecurity,
-            @AllowHiveTableRename boolean allowTableRename)
+            @AllowHiveTableRename boolean allowTableRename,
+            SchemaMappingPrefixes schemaMappingPrefixes)
     {
         this(catalogName,
                 metastoreFactory,
@@ -138,7 +140,8 @@ public class HiveMetadataFactory
                 hiveConfig.isPartitionProjectionEnabled(),
                 allowTableRename,
                 hiveConfig.getTimestampPrecision(),
-                hiveConfig.getMetadataParallelism());
+                hiveConfig.getMetadataParallelism(),
+                schemaMappingPrefixes);
     }
 
     public HiveMetadataFactory(
@@ -176,7 +179,8 @@ public class HiveMetadataFactory
             boolean partitionProjectionEnabled,
             boolean allowTableRename,
             HiveTimestampPrecision hiveViewsTimestampPrecision,
-            int metadataParallelism)
+            int metadataParallelism,
+            SchemaMappingPrefixes schemaMappingPrefixes)
     {
         this.catalogName = requireNonNull(catalogName, "catalogName is null");
         this.skipDeletionForAlter = skipDeletionForAlter;
@@ -219,6 +223,7 @@ public class HiveMetadataFactory
         this.partitionProjectionEnabled = partitionProjectionEnabled;
         this.allowTableRename = allowTableRename;
         this.hiveViewsTimestampPrecision = requireNonNull(hiveViewsTimestampPrecision, "hiveViewsTimestampPrecision is null");
+        this.schemaMappingPrefixes = requireNonNull(schemaMappingPrefixes, "schemaMappingPrefixes is null");
         if (metadataParallelism == 1) {
             this.metadataFetchingExecutor = directExecutor();
         }
@@ -274,6 +279,7 @@ public class HiveMetadataFactory
                 allowTableRename,
                 maxPartitionDropsPerQuery,
                 hiveViewsTimestampPrecision,
-                metadataFetchingExecutor);
+                metadataFetchingExecutor,
+                schemaMappingPrefixes);
     }
 }
