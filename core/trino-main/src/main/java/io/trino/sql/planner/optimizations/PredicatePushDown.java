@@ -913,8 +913,7 @@ public class PredicatePushDown
                     if (!isDeterministic(conjunct)) {
                         nonDeterministic.add(conjunct);
                     }
-                    // Unsafe pushdown keeps may-fail conjuncts in their original position
-                    else if (!allowUnsafePushdown && mayFail(plannerContext, getCharVarcharCoercion(session), conjunct)) {
+                    else if (mayFail(plannerContext, getCharVarcharCoercion(session), conjunct)) {
                         mayFail.add(conjunct);
                     }
                     else if (isInferenceCandidate(plannerContext, getCharVarcharCoercion(session), conjunct)) {
@@ -1008,7 +1007,7 @@ public class PredicatePushDown
             boolean doNotPush = !combineConjuncts(joinConjuncts.build()).equals(TRUE);
             // attempt to push down the predicates that may fail
             for (Expression conjunct : mayFail) {
-                if (doNotPush) {
+                if (doNotPush && !allowUnsafePushdown) {
                     joinConjuncts.add(allInference.rewrite(conjunct, Sets.union(leftScope, rightScope)));
                 }
                 else {
