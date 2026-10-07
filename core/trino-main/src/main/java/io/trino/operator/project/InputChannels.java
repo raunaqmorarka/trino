@@ -62,11 +62,6 @@ public class InputChannels
         return inputChannels.length;
     }
 
-    public boolean isEagerlyLoaded(int channel)
-    {
-        return eagerlyLoad != null && eagerlyLoad[channel];
-    }
-
     public List<Integer> getInputChannels()
     {
         return Collections.unmodifiableList(Ints.asList(inputChannels));
