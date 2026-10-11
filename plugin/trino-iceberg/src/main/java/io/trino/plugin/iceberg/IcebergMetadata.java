@@ -95,8 +95,8 @@ import io.trino.spi.connector.ConnectorOutputTableHandle;
 import io.trino.spi.connector.ConnectorPartitioningHandle;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableCredentials;
-import io.trino.spi.connector.ConnectorTableExecuteHandle;
 import io.trino.spi.connector.ConnectorTableDependency;
+import io.trino.spi.connector.ConnectorTableExecuteHandle;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTableLayout;
 import io.trino.spi.connector.ConnectorTableMetadata;
@@ -199,6 +199,7 @@ import org.apache.iceberg.exceptions.CommitStateUnknownException;
 import org.apache.iceberg.exceptions.NotFoundException;
 import org.apache.iceberg.exceptions.RESTException;
 import org.apache.iceberg.exceptions.ValidationException;
+import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.expressions.Literal;
 import org.apache.iceberg.expressions.Term;
@@ -469,7 +470,11 @@ import static org.apache.iceberg.TableProperties.WRITE_DATA_LOCATION;
 import static org.apache.iceberg.TableProperties.WRITE_LOCATION_PROVIDER_IMPL;
 import static org.apache.iceberg.TableProperties.WRITE_TARGET_FILE_SIZE_BYTES;
 import static org.apache.iceberg.TableUtil.formatVersion;
+import static org.apache.iceberg.expressions.Expressions.alwaysFalse;
 import static org.apache.iceberg.expressions.Expressions.alwaysTrue;
+import static org.apache.iceberg.expressions.Expressions.and;
+import static org.apache.iceberg.expressions.Expressions.not;
+import static org.apache.iceberg.expressions.Expressions.or;
 import static org.apache.iceberg.types.TypeUtil.indexParents;
 import static org.apache.iceberg.util.LocationUtil.stripTrailingSlash;
 import static org.apache.iceberg.util.PropertyUtil.propertyAsInt;
@@ -540,6 +545,9 @@ public class IcebergMetadata
     private final int domainCompactionThreshold;
     private final Map<IcebergTableHandle, AtomicReference<TableStatistics>> tableStatisticsCache = new ConcurrentHashMap<>();
     private final Map<PartitionSummaryPredicateKey, TupleDomain<IcebergColumnHandle>> partitionSummaryPredicateCache = new ConcurrentHashMap<>();
+
+    // Base tables whose metadata tables this transaction reads, which MERGE treats as fully read
+    private final Set<SchemaTableName> metadataTableReads = ConcurrentHashMap.newKeySet();
     private final IcebergTableCredentialsProvider tableCredentialsProvider;
     private final DeletionVectorWriter deletionVectorWriter;
     private final ConnectorExpressionEvaluator evaluator;
@@ -906,8 +914,9 @@ public class IcebergMetadata
     @Override
     public Optional<SystemTable> getSystemTable(ConnectorSession session, SchemaTableName tableName)
     {
-        return getRawSystemTable(session, tableName)
-                .map(systemTable -> new ClassLoaderSafeSystemTable(systemTable, getClass().getClassLoader()));
+        Optional<SystemTable> systemTable = getRawSystemTable(session, tableName);
+        systemTable.ifPresent(_ -> metadataTableReads.add(new SchemaTableName(tableName.getSchemaName(), tableNameFrom(tableName.getTableName()))));
+        return systemTable.map(table -> new ClassLoaderSafeSystemTable(table, getClass().getClassLoader()));
     }
 
     private Optional<BaseTable> getRawBaseTable(ConnectorSession session, SchemaTableName tableName)
@@ -3416,7 +3425,59 @@ public class IcebergMetadata
     {
         IcebergMergeTableHandle mergeHandle = (IcebergMergeTableHandle) mergeTableHandle;
         IcebergTableHandle handle = mergeHandle.getTableHandle();
-        return finishWrite(session, handle, fragments);
+        return finishWrite(session, handle, getConflictDetectionFilter(handle, tableDependencies), fragments);
+    }
+
+    /**
+     * Returns the filter covering every row of the target table that the statement depends on at the current snapshot,
+     * or empty when the statement depends on no such rows.
+     */
+    private Optional<Expression> getConflictDetectionFilter(IcebergTableHandle target, List<ConnectorTableDependency> tableDependencies)
+    {
+        SchemaTableName targetName = target.getSchemaTableName();
+        if (metadataTableReads.contains(targetName)) {
+            return Optional.of(alwaysTrue());
+        }
+        Expression filter = alwaysFalse();
+        for (ConnectorTableDependency dependency : tableDependencies) {
+            if (!(dependency.tableHandle() instanceof IcebergTableHandle dependencyHandle)) {
+                continue;
+            }
+            // Reads of other tables are unaffected by concurrent commits to the target, and a read of another
+            // snapshot is time travel over immutable history
+            if (!dependencyHandle.getSchemaTableName().equals(targetName) || !dependencyHandle.getSnapshotId().equals(target.getSnapshotId())) {
+                continue;
+            }
+            filter = or(filter, getConflictDetectionFilter(dependencyHandle, dependency.tablePropertiesPredicate()));
+        }
+        if (filter.op() == Expression.Operation.FALSE) {
+            return Optional.empty();
+        }
+        return Optional.of(filter);
+    }
+
+    private static Expression getConflictDetectionFilter(IcebergTableHandle handle, Optional<TupleDomain<ColumnHandle>> tablePropertiesPredicate)
+    {
+        // Metadata columns are enforced by the split source and domains without an Iceberg expression are dropped, which only widens the filter
+        Expression rowsMatchingHandle = toIcebergExpression(handle.getEnforcedPredicate()
+                .filter((column, _) -> !isMetadataColumnId(column.getId()))
+                .intersect(handle.getUnenforcedPredicate())
+                .filter((_, domain) -> isConvertibleToIcebergExpression(domain)));
+        if (tablePropertiesPredicate.isEmpty()) {
+            return rowsMatchingHandle;
+        }
+        // The plan assumed every row matching the handle satisfies the table properties predicate, so only rows outside it conflict
+        TupleDomain<IcebergColumnHandle> assumedPredicate = tablePropertiesPredicate.get().transformKeys(IcebergColumnHandle.class::cast);
+        if (assumedPredicate.isNone()) {
+            return rowsMatchingHandle;
+        }
+        // Dropping a domain would widen the assumed predicate and narrow its negation, so the negation is only applied when every domain converts
+        boolean convertible = assumedPredicate.getDomains().orElseThrow().entrySet().stream()
+                .allMatch(entry -> !isMetadataColumnId(entry.getKey().getId()) && isConvertibleToIcebergExpression(entry.getValue()));
+        if (!convertible) {
+            return rowsMatchingHandle;
+        }
+        return and(rowsMatchingHandle, not(toIcebergExpression(assumedPredicate)));
     }
 
     private static void verifyTableVersionForUpdate(IcebergTableHandle table)
@@ -3441,7 +3502,7 @@ public class IcebergMetadata
         }
     }
 
-    private Optional<ConnectorOutputMetadata> finishWrite(ConnectorSession session, IcebergTableHandle table, Collection<Slice> fragments)
+    private Optional<ConnectorOutputMetadata> finishWrite(ConnectorSession session, IcebergTableHandle table, Optional<Expression> conflictDetectionFilter, Collection<Slice> fragments)
     {
         if (fragments.isEmpty()) {
             // Avoid recording "empty" write operation
@@ -3456,13 +3517,18 @@ public class IcebergMetadata
         if (baseSnapshotId.isPresent()) {
             rowDelta.validateFromSnapshot(icebergTable.snapshot(baseSnapshotId.orElseThrow()).snapshotId());
         }
+        // A statement that reads no rows of the target cannot be invalidated by concurrent commits.
+        // Target reads without a table scan, such as table_changes, name explicit snapshots and read immutable history.
+        boolean readsTarget = conflictDetectionFilter.isPresent();
         IsolationLevel isolationLevel = IsolationLevel.fromName(icebergTable.properties().getOrDefault(DELETE_ISOLATION_LEVEL, DELETE_ISOLATION_LEVEL_DEFAULT));
-        if (isolationLevel == IsolationLevel.SERIALIZABLE) {
+        if (isolationLevel == IsolationLevel.SERIALIZABLE && readsTarget) {
             rowDelta.validateNoConflictingDataFiles();
         }
 
-        // Ensure a row that is updated by this commit was not deleted by a separate commit
-        rowDelta.validateDeletedFiles();
+        if (readsTarget) {
+            // Ensure a row that is updated by this commit was not deleted by a separate commit
+            rowDelta.validateDeletedFiles();
+        }
         rowDelta.scanManifestsWith(icebergScanExecutor);
 
         int formatVersion = table.getFormatVersion();
@@ -3537,13 +3603,9 @@ public class IcebergMetadata
             }
         }
 
-        TupleDomain<IcebergColumnHandle> dataColumnPredicate = table.getEnforcedPredicate().filter((column, _) -> !isMetadataColumnId(column.getId()));
-        TupleDomain<IcebergColumnHandle> effectivePredicate = dataColumnPredicate.intersect(table.getUnenforcedPredicate());
-        effectivePredicate = effectivePredicate.filter((_, domain) -> isConvertibleToIcebergExpression(domain));
-
-        if (!effectivePredicate.isAll()) {
-            rowDelta.conflictDetectionFilter(toIcebergExpression(effectivePredicate));
-        }
+        conflictDetectionFilter
+                .filter(filter -> filter.op() != Expression.Operation.TRUE)
+                .ifPresent(rowDelta::conflictDetectionFilter);
 
         // dropped (fully-deleted) files must be excluded below: Iceberg rejects removing a data file
         // that validateDataFilesExist() also checks for in the same commit
@@ -3556,7 +3618,7 @@ public class IcebergMetadata
                     .filter(path -> !fullyDeletedDataFiles.contains(path))
                     .collect(toImmutableList()));
         }
-        if (hasDataTasks) {
+        if (hasDataTasks && readsTarget) {
             // Iceberg requires this for UPDATE and MERGE only. Deleting a row that a concurrent commit also deleted is idempotent.
             // A commit writing data files is an UPDATE or a MERGE, a commit writing only position deletes is a DELETE.
             rowDelta.validateNoConflictingDeleteFiles();
@@ -3565,7 +3627,6 @@ public class IcebergMetadata
         commitWriteTransaction(transaction, "write");
         return outputMetadata(icebergTable);
     }
-
 
     @Override
     public void createView(ConnectorSession session, SchemaTableName viewName, ConnectorViewDefinition definition, Map<String, Object> viewProperties, boolean replace)

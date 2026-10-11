@@ -15,6 +15,7 @@ package io.trino.plugin.iceberg;
 
 import com.google.common.collect.ImmutableList;
 import io.airlift.concurrent.MoreFutures;
+import io.trino.Session;
 import io.trino.plugin.blackhole.BlackHolePlugin;
 import io.trino.testing.AbstractTestQueryFramework;
 import io.trino.testing.DistributedQueryRunner;
@@ -46,6 +47,7 @@ import static java.lang.String.format;
 import static java.util.concurrent.Executors.newFixedThreadPool;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.TestInstance.Lifecycle.PER_CLASS;
 
 @TestInstance(PER_CLASS)
@@ -1503,17 +1505,310 @@ final class TestIcebergLocalConcurrentWrites
                     """.formatted(table.getName()),
                     1);
 
-            try {
-                slowMerge.get(60, SECONDS);
-            }
-            catch (ExecutionException e) {
-                assertThat(getTrinoExceptionCause(e)).hasMessageContaining("Found conflicting files that can contain records matching");
-            }
-            assertThat(computeScalar("SELECT count(*) FROM " + table.getName() + " WHERE id = 6001")).isEqualTo(1L);
+            assertThatThrownBy(() -> slowMerge.get(60, SECONDS))
+                    .isInstanceOf(ExecutionException.class)
+                    .satisfies(failure -> assertThat(getTrinoExceptionCause(failure))
+                            .hasMessageContaining("Found conflicting files that can contain records matching"));
+            assertThat(query("SELECT v FROM " + table.getName() + " WHERE id = 6001")).matches("VALUES VARCHAR 'fast'");
         }
         finally {
             executor.shutdownNow();
             assertThat(executor.awaitTermination(10, SECONDS)).isTrue();
+            assertUpdate("DROP TABLE " + delayTable);
+        }
+    }
+
+    @Test
+    void testConcurrentMergeWithoutTargetReadIgnoresConcurrentInsert()
+            throws Exception
+    {
+        // A merge whose source does not read the target commits alongside a concurrent insert
+        String tableName = "test_concurrent_merge_no_target_read_" + randomNameSuffix();
+        String delayTable = "blackhole.default.delay_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + delayTable + " (dummy INTEGER) WITH (split_count = 1, pages_per_split = 1, rows_per_page = 1, page_processing_delay = '10s')");
+        assertUpdate("CREATE TABLE " + tableName + " (id, part) WITH (partitioning = ARRAY['part']) AS VALUES (1, 1)", 1);
+        ExecutorService executor = newFixedThreadPool(1);
+        try {
+            Future<?> slowMerge = executor.submit(() -> getQueryRunner().execute(
+                    "MERGE INTO " + tableName + " t USING (SELECT 7 AS id, 7 AS part FROM " + delayTable + ") s ON FALSE " +
+                            "WHEN NOT MATCHED THEN INSERT (id, part) VALUES (s.id, s.part)"));
+            Thread.sleep(2_000);
+            assertUpdate("INSERT INTO " + tableName + " VALUES (2, 2)", 1);
+            slowMerge.get(60, SECONDS);
+
+            assertThat(query("SELECT * FROM " + tableName)).matches("VALUES (1, 1), (2, 2), (7, 7)");
+        }
+        finally {
+            executor.shutdownNow();
+            assertThat(executor.awaitTermination(10, SECONDS)).isTrue();
+            assertUpdate("DROP TABLE " + tableName);
+            assertUpdate("DROP TABLE " + delayTable);
+        }
+    }
+
+    @Test
+    void testConcurrentMergeReadingTargetInSourceDetectsConflict()
+            throws Exception
+    {
+        // Merge source reads the target table, so the whole target is validated
+        String tableName = "test_concurrent_merge_self_read_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + tableName + " (id, part) WITH (partitioning = ARRAY['part']) AS VALUES (1, 1)", 1);
+        assertSlowWriteConflictsWithInsert(
+                tableName,
+                "MERGE INTO %s t USING (SELECT id, part FROM %s CROSS JOIN %s) s ON t.part = s.part AND t.id = s.id " +
+                        "WHEN MATCHED THEN UPDATE SET id = t.id + 10 " +
+                        "WHEN NOT MATCHED THEN INSERT (id, part) VALUES (s.id, s.part)",
+                tableName,
+                "INSERT INTO " + tableName + " VALUES (2, 2)");
+    }
+
+    @Test
+    void testConcurrentMergeWithPredicateInferredFromSourceDetectsConflict()
+            throws Exception
+    {
+        // Predicate inferred from the source's partitions covers the partition a concurrent insert writes
+        String suffix = randomNameSuffix();
+        String tableName = "test_concurrent_merge_inferred_" + suffix;
+        String sourceTable = "test_concurrent_merge_inferred_source_" + suffix;
+        assertUpdate("CREATE TABLE " + tableName + " (id, part) WITH (partitioning = ARRAY['part']) AS VALUES (1, 1)", 1);
+        assertUpdate("CREATE TABLE " + sourceTable + " (id, part) WITH (partitioning = ARRAY['part']) AS VALUES (1, 1), (5, 3)", 2);
+        try {
+            assertSlowWriteConflictsWithInsert(
+                    tableName,
+                    "MERGE INTO %s t USING (SELECT id, part FROM %s CROSS JOIN %s) s ON t.part = s.part AND t.id = s.id " +
+                            "WHEN MATCHED THEN UPDATE SET id = t.id + 10 " +
+                            "WHEN NOT MATCHED THEN INSERT (id, part) VALUES (s.id, s.part)",
+                    sourceTable,
+                    "INSERT INTO " + tableName + " VALUES (5, 3)");
+        }
+        finally {
+            assertUpdate("DROP TABLE " + sourceTable);
+        }
+    }
+
+    @Test
+    void testConcurrentMergeReadingTargetMetadataTableDetectsConflict()
+            throws Exception
+    {
+        // Merge source reads the target's $partitions table, so the whole target is validated
+        String tableName = "test_concurrent_merge_metadata_read_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + tableName + " (id, part) WITH (partitioning = ARRAY['part']) AS VALUES (1, 1)", 1);
+        assertSlowWriteConflictsWithInsert(
+                tableName,
+                "MERGE INTO %s t USING (SELECT CAST(max(partition.part) + 1 AS integer) AS part FROM \"%s$partitions\" CROSS JOIN %s) s ON FALSE " +
+                        "WHEN NOT MATCHED THEN INSERT (id, part) VALUES (1, s.part)",
+                tableName,
+                "INSERT INTO " + tableName + " VALUES (2, 2)");
+    }
+
+    @Test
+    void testConcurrentMergeWithMetadataOptimizedTargetReadDetectsConflict()
+            throws Exception
+    {
+        // Metadata query optimization keeps the target read in the merge source
+        String tableName = "test_concurrent_merge_metadata_optimized_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + tableName + " (id, part) WITH (partitioning = ARRAY['part']) AS VALUES (1, 1)", 1);
+        Session session = Session.builder(getSession())
+                .setSystemProperty("optimize_metadata_queries", "true")
+                .build();
+        assertSlowWriteConflictsWithInsert(
+                session,
+                tableName,
+                "MERGE INTO %s t USING (SELECT m.part FROM (SELECT max(part) + 1 AS part FROM %s) m CROSS JOIN %s) s ON FALSE " +
+                        "WHEN NOT MATCHED THEN INSERT (id, part) VALUES (1, s.part)",
+                tableName,
+                "INSERT INTO " + tableName + " VALUES (2, 2)");
+    }
+
+    @Test
+    void testConcurrentMergeWithTargetScanRemovedByPartitionBoundsDetectsConflict()
+            throws Exception
+    {
+        // The target scan is removed because no partition can match, so a concurrent insert into that partition conflicts
+        String tableName = "test_concurrent_merge_removed_target_scan_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + tableName + " (id, part) WITH (partitioning = ARRAY['part']) AS VALUES (1, 1)", 1);
+        assertSlowWriteConflictsWithInsert(
+                tableName,
+                "MERGE INTO %1$s t USING (SELECT 1 AS id, 2 AS part FROM %3$s) s ON t.part = s.part AND t.id = s.id " +
+                        "WHEN MATCHED THEN UPDATE SET id = t.id + 10 " +
+                        "WHEN NOT MATCHED THEN INSERT (id, part) VALUES (s.id, s.part)",
+                tableName,
+                "INSERT INTO " + tableName + " VALUES (1, 2)");
+    }
+
+    @Test
+    void testConcurrentMergeWithTargetScanRemovedByPartitionBoundsIgnoresUnrelatedInsert()
+            throws Exception
+    {
+        // The removed target scan only depends on the partition it would have read
+        String tableName = "test_concurrent_merge_removed_target_scan_unrelated_" + randomNameSuffix();
+        String delayTable = "blackhole.default.delay_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + delayTable + " (dummy INTEGER) WITH (split_count = 1, pages_per_split = 1, rows_per_page = 1, page_processing_delay = '10s')");
+        assertUpdate("CREATE TABLE " + tableName + " (id, part) WITH (partitioning = ARRAY['part']) AS VALUES (1, 1)", 1);
+        ExecutorService executor = newFixedThreadPool(1);
+        try {
+            Future<?> slowMerge = executor.submit(() -> getQueryRunner().execute(
+                    "MERGE INTO " + tableName + " t USING (SELECT 1 AS id, 2 AS part FROM " + delayTable + ") s ON t.part = s.part AND t.id = s.id " +
+                            "WHEN MATCHED THEN UPDATE SET id = t.id + 10 " +
+                            "WHEN NOT MATCHED THEN INSERT (id, part) VALUES (s.id, s.part)"));
+            Thread.sleep(2_000);
+            assertUpdate("INSERT INTO " + tableName + " VALUES (5, 5)", 1);
+            slowMerge.get(60, SECONDS);
+
+            assertThat(query("SELECT * FROM " + tableName)).matches("VALUES (1, 1), (1, 2), (5, 5)");
+        }
+        finally {
+            executor.shutdownNow();
+            assertThat(executor.awaitTermination(10, SECONDS)).isTrue();
+            assertUpdate("DROP TABLE " + tableName);
+            assertUpdate("DROP TABLE " + delayTable);
+        }
+    }
+
+    @Test
+    void testConcurrentMergeWithRemovedNotExistsSubqueryOnTargetDetectsConflict()
+            throws Exception
+    {
+        // The NOT EXISTS scan of the target is removed because no partition can match, so a concurrent insert into that partition conflicts
+        String tableName = "test_concurrent_merge_removed_not_exists_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + tableName + " (id, part) WITH (partitioning = ARRAY['part']) AS VALUES (1, 1)", 1);
+        assertSlowWriteConflictsWithInsert(
+                tableName,
+                "MERGE INTO %1$s t USING (SELECT 5 AS id, 3 AS part FROM %3$s WHERE NOT EXISTS (SELECT 1 FROM %1$s WHERE part = 3)) s ON FALSE " +
+                        "WHEN NOT MATCHED THEN INSERT (id, part) VALUES (s.id, s.part)",
+                tableName,
+                "INSERT INTO " + tableName + " VALUES (9, 3)");
+    }
+
+    @Test
+    void testConcurrentDeleteWithRemovedNotExistsSubqueryOnTargetDetectsConflict()
+            throws Exception
+    {
+        // The NOT EXISTS scan of the target is removed because no partition can match, so a concurrent insert into that partition conflicts
+        String tableName = "test_concurrent_delete_removed_not_exists_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + tableName + " (id, part) WITH (partitioning = ARRAY['part']) AS VALUES (1, 1)", 1);
+        assertSlowWriteConflictsWithInsert(
+                tableName,
+                "DELETE FROM %1$s WHERE id IN (SELECT 1 FROM %3$s) AND NOT EXISTS (SELECT 1 FROM %1$s WHERE part = 3)",
+                tableName,
+                "INSERT INTO " + tableName + " VALUES (9, 3)");
+    }
+
+    @Test
+    void testConcurrentUpdateWithRemovedNotExistsSubqueryOnTargetDetectsConflict()
+            throws Exception
+    {
+        // The NOT EXISTS scan of the target is removed because no partition can match, so a concurrent insert into that partition conflicts
+        String tableName = "test_concurrent_update_removed_not_exists_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + tableName + " (id, part) WITH (partitioning = ARRAY['part']) AS VALUES (1, 1)", 1);
+        assertSlowWriteConflictsWithInsert(
+                tableName,
+                "UPDATE %1$s SET id = id + 10 WHERE id IN (SELECT 1 FROM %3$s) AND NOT EXISTS (SELECT 1 FROM %1$s WHERE part = 3)",
+                tableName,
+                "INSERT INTO " + tableName + " VALUES (9, 3)");
+    }
+
+    @Test
+    void testConcurrentMergeWithHiddenColumnPredicateOnTargetDetectsConflict()
+            throws Exception
+    {
+        // A table properties predicate on a hidden column falls back to the whole read, so any concurrent insert conflicts
+        String tableName = "test_concurrent_merge_hidden_column_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + tableName + " (id, part) WITH (partitioning = ARRAY['part']) AS VALUES (1, 1)", 1);
+        assertSlowWriteConflictsWithInsert(
+                tableName,
+                "MERGE INTO %1$s t USING (SELECT 7 AS id, 7 AS part FROM %1$s CROSS JOIN %3$s WHERE \"$path\" IS NOT NULL) s ON FALSE " +
+                        "WHEN NOT MATCHED THEN INSERT (id, part) VALUES (s.id, s.part)",
+                tableName,
+                "INSERT INTO " + tableName + " VALUES (5, 1)");
+    }
+
+    @Test
+    void testConcurrentMergeWithTimeTravelOnTargetIgnoresConcurrentInsert()
+            throws Exception
+    {
+        // A source reading an older snapshot of the target is time travel over immutable history
+        String tableName = "test_concurrent_merge_time_travel_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + tableName + " (id, part) WITH (partitioning = ARRAY['part']) AS VALUES (1, 1)", 1);
+        long olderSnapshotId = getCurrentSnapshotId(tableName);
+        assertUpdate("INSERT INTO " + tableName + " VALUES (2, 2)", 1);
+        assertSlowWriteCommitsWithInsert(
+                tableName,
+                "MERGE INTO %1$s t USING (SELECT id + 10 AS id, part FROM %1$s FOR VERSION AS OF " + olderSnapshotId + " CROSS JOIN %3$s) s ON FALSE " +
+                        "WHEN NOT MATCHED THEN INSERT (id, part) VALUES (s.id, s.part)",
+                tableName,
+                "INSERT INTO " + tableName + " VALUES (3, 3)",
+                "VALUES (1, 1), (2, 2), (3, 3), (11, 1)");
+    }
+
+    @Test
+    void testConcurrentMergeWithTableChangesOnTargetIgnoresConcurrentInsert()
+            throws Exception
+    {
+        // A source reading table_changes of the target names explicit snapshots and reads immutable history
+        String tableName = "test_concurrent_merge_table_changes_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + tableName + " (id, part) WITH (partitioning = ARRAY['part']) AS VALUES (1, 1)", 1);
+        long startSnapshotId = getCurrentSnapshotId(tableName);
+        assertUpdate("INSERT INTO " + tableName + " VALUES (2, 2)", 1);
+        long endSnapshotId = getCurrentSnapshotId(tableName);
+        assertSlowWriteCommitsWithInsert(
+                tableName,
+                "MERGE INTO %1$s t USING (SELECT id + 10 AS id, part FROM TABLE(system.table_changes(CURRENT_SCHEMA, '%1$s', " + startSnapshotId + ", " + endSnapshotId + ")) CROSS JOIN %3$s) s ON FALSE " +
+                        "WHEN NOT MATCHED THEN INSERT (id, part) VALUES (s.id, s.part)",
+                tableName,
+                "INSERT INTO " + tableName + " VALUES (3, 3)",
+                "VALUES (1, 1), (2, 2), (3, 3), (12, 2)");
+    }
+
+    // Runs the write formatted with (tableName, sourceTable, delayTable), commits the insert while it runs and expects both to commit
+    private void assertSlowWriteCommitsWithInsert(String tableName, String writeFormat, String sourceTable, String concurrentInsert, String expectedRows)
+            throws Exception
+    {
+        String delayTable = "blackhole.default.delay_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + delayTable + " (dummy INTEGER) WITH (split_count = 1, pages_per_split = 1, rows_per_page = 1, page_processing_delay = '10s')");
+        ExecutorService executor = newFixedThreadPool(1);
+        try {
+            Future<?> slowWrite = executor.submit(() -> getQueryRunner().execute(writeFormat.formatted(tableName, sourceTable, delayTable)));
+            Thread.sleep(2_000);
+            assertUpdate(concurrentInsert, 1);
+            slowWrite.get(60, SECONDS);
+
+            assertThat(query("SELECT * FROM " + tableName)).matches(expectedRows);
+        }
+        finally {
+            executor.shutdownNow();
+            assertThat(executor.awaitTermination(10, SECONDS)).isTrue();
+            assertUpdate("DROP TABLE " + tableName);
+            assertUpdate("DROP TABLE " + delayTable);
+        }
+    }
+
+    private void assertSlowWriteConflictsWithInsert(String tableName, String writeFormat, String sourceTable, String concurrentInsert)
+            throws Exception
+    {
+        assertSlowWriteConflictsWithInsert(getSession(), tableName, writeFormat, sourceTable, concurrentInsert);
+    }
+
+    // Runs the write formatted with (tableName, sourceTable, delayTable), commits the insert while it runs and expects the write to fail
+    private void assertSlowWriteConflictsWithInsert(Session session, String tableName, String writeFormat, String sourceTable, String concurrentInsert)
+            throws Exception
+    {
+        String delayTable = "blackhole.default.delay_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + delayTable + " (dummy INTEGER) WITH (split_count = 1, pages_per_split = 1, rows_per_page = 1, page_processing_delay = '10s')");
+        ExecutorService executor = newFixedThreadPool(1);
+        try {
+            Future<?> slowWrite = executor.submit(() -> getQueryRunner().execute(session, writeFormat.formatted(tableName, sourceTable, delayTable)));
+            Thread.sleep(2_000);
+            assertUpdate(concurrentInsert, 1);
+            assertThatThrownBy(() -> slowWrite.get(60, SECONDS))
+                    .isInstanceOf(ExecutionException.class)
+                    .satisfies(failure -> assertThat(getTrinoExceptionCause(failure))
+                            .hasMessageMatching("Failed to commit the transaction during write.*|Failed to commit during write.*"));
+        }
+        finally {
+            executor.shutdownNow();
+            assertThat(executor.awaitTermination(10, SECONDS)).isTrue();
+            assertUpdate("DROP TABLE " + tableName);
             assertUpdate("DROP TABLE " + delayTable);
         }
     }
