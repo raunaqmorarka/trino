@@ -378,6 +378,7 @@ import static io.trino.plugin.iceberg.IcebergUtil.validateOrcBloomFilterColumns;
 import static io.trino.plugin.iceberg.IcebergUtil.validateParquetBloomFilterColumns;
 import static io.trino.plugin.iceberg.IcebergUtil.verifyExtraProperties;
 import static io.trino.plugin.iceberg.PartitionFields.parsePartitionFields;
+import static io.trino.plugin.iceberg.PartitionSummaryPredicate.getPartitionSummaryPredicate;
 import static io.trino.plugin.iceberg.SortFieldUtils.parseSortFields;
 import static io.trino.plugin.iceberg.StructLikeWrapperWithFieldIdToIndex.createStructLikeWrapper;
 import static io.trino.plugin.iceberg.TableStatisticsReader.readNdvs;
@@ -535,7 +536,9 @@ public class IcebergMetadata
     private final ExecutorService icebergFileDeleteExecutor;
     private final int materializedViewRefreshMaxSnapshotsToExpire;
     private final Duration materializedViewRefreshSnapshotRetentionPeriod;
+    private final int domainCompactionThreshold;
     private final Map<IcebergTableHandle, AtomicReference<TableStatistics>> tableStatisticsCache = new ConcurrentHashMap<>();
+    private final Map<PartitionSummaryPredicateKey, TupleDomain<IcebergColumnHandle>> partitionSummaryPredicateCache = new ConcurrentHashMap<>();
     private final IcebergTableCredentialsProvider tableCredentialsProvider;
     private final DeletionVectorWriter deletionVectorWriter;
     private final ConnectorExpressionEvaluator evaluator;
@@ -566,6 +569,7 @@ public class IcebergMetadata
             ExecutorService icebergFileDeleteExecutor,
             int materializedViewRefreshMaxSnapshotsToExpire,
             Duration materializedViewRefreshSnapshotRetentionPeriod,
+            int domainCompactionThreshold,
             ConnectorExpressionEvaluator evaluator)
     {
         this.catalogName = requireNonNull(catalogName, "catalogName is null");
@@ -585,6 +589,7 @@ public class IcebergMetadata
         this.deletionVectorWriter = requireNonNull(deletionVectorWriter, "deletionVectorWriter is null");
         this.materializedViewRefreshMaxSnapshotsToExpire = materializedViewRefreshMaxSnapshotsToExpire;
         this.materializedViewRefreshSnapshotRetentionPeriod = materializedViewRefreshSnapshotRetentionPeriod;
+        this.domainCompactionThreshold = domainCompactionThreshold;
         this.tableCredentialsProvider = new IcebergTableCredentialsProvider(catalog);
         this.evaluator = requireNonNull(evaluator, "evaluator is null");
     }
@@ -996,19 +1001,29 @@ public class IcebergMetadata
 
         Table icebergTable = catalog.loadTable(session, table.getSchemaTableName());
 
-        // Extract identity partition fields that are present in all partition specs, for creating the discrete predicates.
+        // Identity partition columns present in all partition specs bound the predicate and form the discrete predicates
         Set<Integer> partitionSourceIds = identityPartitionColumnsInAllSpecs(icebergTable);
+        Map<Integer, IcebergColumnHandle> columns = getProjectedColumns(icebergTable.schema(), typeManager, partitionSourceIds).stream()
+                .collect(toImmutableMap(IcebergColumnHandle::getId, identity()));
 
         TupleDomain<IcebergColumnHandle> enforcedPredicate = table.getEnforcedPredicate();
         // Predicates on hidden columns are enforced by the split source and cannot be applied to a scan
         boolean hasHiddenColumnPredicate = !enforcedPredicate.filter((column, _) -> isMetadataColumnId(column.getId())).isAll();
 
+        TupleDomain<IcebergColumnHandle> predicate = enforcedPredicate;
+        if (!columns.isEmpty()) {
+            long snapshotId = table.getSnapshotId().orElseThrow();
+            predicate = predicate.intersect(partitionSummaryPredicateCache.computeIfAbsent(
+                    new PartitionSummaryPredicateKey(table.getSchemaTableName(), snapshotId, enforcedPredicate),
+                    _ -> {
+                        // The manifest list is cached in the snapshot and is also read by statistics and split planning
+                        List<ManifestFile> dataManifests = icebergTable.snapshot(snapshotId).dataManifests(icebergTable.io());
+                        return getPartitionSummaryPredicate(dataManifests, icebergTable.specs(), columns, enforcedPredicate, domainCompactionThreshold);
+                    }));
+        }
+
         DiscretePredicates discretePredicates = null;
         if (!partitionSourceIds.isEmpty() && !hasHiddenColumnPredicate) {
-            // Extract identity partition columns
-            Map<Integer, IcebergColumnHandle> columns = getProjectedColumns(icebergTable.schema(), typeManager, partitionSourceIds).stream()
-                    .collect(toImmutableMap(IcebergColumnHandle::getId, identity()));
-
             Supplier<Map<StructLikeWrapperWithFieldIdToIndex, PartitionSpec>> lazyUniquePartitions = Suppliers.memoize(() -> {
                 TableScan tableScan = icebergTable.newScan()
                         .useSnapshot(table.getSnapshotId().orElseThrow())
@@ -1060,11 +1075,8 @@ public class IcebergMetadata
         }
 
         return new ConnectorTableProperties(
-                // Using the predicate here directly avoids eagerly loading all partition values. Logically, this
-                // still keeps predicate and discretePredicates evaluation the same on every row of the table. This
-                // can be further optimized by intersecting with partition values at the cost of iterating
-                // over all tableScan.planFiles() and caching partition values in table handle.
-                enforcedPredicate.transformKeys(ColumnHandle.class::cast),
+                // Partition summaries bound the predicate without eagerly loading all partition values
+                predicate.transformKeys(ColumnHandle.class::cast),
                 table.getTablePartitioning().flatMap(IcebergTablePartitioning::toConnectorTablePartitioning),
                 Optional.ofNullable(discretePredicates),
                 // todo support sorting properties
@@ -3842,6 +3854,8 @@ public class IcebergMetadata
                 .map(PartitionField::sourceId)
                 .collect(toImmutableSet());
     }
+
+    private record PartitionSummaryPredicateKey(SchemaTableName tableName, long snapshotId, TupleDomain<IcebergColumnHandle> enforcedPredicate) {}
 
     @Override
     public Optional<ProjectionApplicationResult<ConnectorTableHandle>> applyProjection(

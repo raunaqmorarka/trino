@@ -447,6 +447,48 @@ final class TestIcebergLocalConcurrentWrites
         }
     }
 
+    @Test
+    void testConcurrentMergeFromPartitionedSources()
+            throws Exception
+    {
+        String suffix = randomNameSuffix();
+        String tableName = "test_concurrent_merge_partitioned_sources_" + suffix;
+        String firstSource = "test_concurrent_merge_first_source_" + suffix;
+        String secondSource = "test_concurrent_merge_second_source_" + suffix;
+        String delayTable = "blackhole.default.delay_" + suffix;
+        assertUpdate("CREATE TABLE " + delayTable + " (dummy INTEGER) WITH (split_count = 1, pages_per_split = 1, rows_per_page = 1, page_processing_delay = '10s')");
+        assertUpdate("CREATE TABLE " + tableName + " (id, dt) WITH (partitioning = ARRAY['dt']) AS VALUES (1, 'd1'), (2, 'd2')", 2);
+        assertUpdate("CREATE TABLE " + firstSource + " (id, dt) WITH (partitioning = ARRAY['dt']) AS VALUES (1, 'd1'), (3, 'd1')", 2);
+        assertUpdate("CREATE TABLE " + secondSource + " (id, dt) WITH (partitioning = ARRAY['dt']) AS VALUES (2, 'd2'), (4, 'd2')", 2);
+        ExecutorService executor = newFixedThreadPool(1);
+
+        try {
+            // Source partition summaries bound the target partitions each merge reads
+            Future<?> slowMerge = executor.submit(() -> getQueryRunner().execute(
+                    mergeFrom(tableName, "(SELECT id, dt FROM %s CROSS JOIN %s)".formatted(firstSource, delayTable))));
+            Thread.sleep(2_000);
+            assertUpdate(mergeFrom(tableName, secondSource), 2);
+            slowMerge.get(60, SECONDS);
+
+            assertThat(query("SELECT * FROM " + tableName)).matches("VALUES (11, VARCHAR 'd1'), (12, VARCHAR 'd2'), (3, VARCHAR 'd1'), (4, VARCHAR 'd2')");
+        }
+        finally {
+            executor.shutdownNow();
+            assertThat(executor.awaitTermination(10, SECONDS)).isTrue();
+            assertUpdate("DROP TABLE " + tableName);
+            assertUpdate("DROP TABLE " + firstSource);
+            assertUpdate("DROP TABLE " + secondSource);
+            assertUpdate("DROP TABLE " + delayTable);
+        }
+    }
+
+    private static String mergeFrom(String tableName, String source)
+    {
+        return "MERGE INTO " + tableName + " t USING " + source + " s ON t.dt = s.dt AND t.id = s.id " +
+                "WHEN MATCHED THEN UPDATE SET id = t.id + 10 " +
+                "WHEN NOT MATCHED THEN INSERT (id, dt) VALUES (s.id, s.dt)";
+    }
+
     // Repeat test with invocationCount for better test coverage, since the tested aspect is inherently non-deterministic.
     @RepeatedTest(3)
     void testConcurrentNonOverlappingUpdateMultipleDataFiles()

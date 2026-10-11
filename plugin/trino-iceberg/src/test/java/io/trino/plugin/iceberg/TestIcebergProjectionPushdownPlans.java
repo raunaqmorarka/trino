@@ -213,7 +213,8 @@ public class TestIcebergProjectionPushdownPlans
                                         TupleDomain.all(),
                                         ImmutableMap.of("col0", equalTo(column0Handle), "x", equalTo(columnX))))));
 
-        // Projection and predicate pushdown with joins
+        // Projection and predicate pushdown with joins, where the single partition value of each side turns the join into a cross join
+        TupleDomain<IcebergColumnHandle> partitionPredicate = TupleDomain.withColumnDomains(ImmutableMap.of(column1Handle, Domain.singleValue(INTEGER, 5L)));
         assertPlan(
                 format("SELECT T.col0.x, T.col0, T.col0.y FROM %s T join %s S on T.col1 = S.col1 WHERE (T.col0.x = 2)", testTable, testTable),
                 anyTree(
@@ -223,29 +224,26 @@ public class TestIcebergProjectionPushdownPlans
                                         "expr_0", expression(new Reference(RowType.anonymousRow(BIGINT, BIGINT), "expr_0")),
                                         "expr_0_y", expression(new FieldReference(new Reference(RowType.anonymousRow(BIGINT, BIGINT), "expr_0"), 1))),
                                 join(INNER, builder -> builder
-                                        .equiCriteria("s_expr_1", "t_expr_1")
                                         .left(
-                                                anyTree(
-                                                        tableScan(
-                                                                equalTo(((IcebergTableHandle) tableHandle.get().connectorHandle()).withProjectedColumns(Set.of(column1Handle))),
-                                                                TupleDomain.all(),
-                                                                ImmutableMap.of("s_expr_1", equalTo(column1Handle)))))
-                                        .right(
                                                 anyTree(
                                                         filter(
                                                                 comparison(EQUAL, new Reference(BIGINT, "x"), new Constant(BIGINT, 2L)),
                                                                 tableScan(
                                                                         table -> {
                                                                             IcebergTableHandle icebergTableHandle = (IcebergTableHandle) table;
-                                                                            TupleDomain<IcebergColumnHandle> unenforcedConstraint = icebergTableHandle.getUnenforcedPredicate();
-                                                                            Set<IcebergColumnHandle> expectedProjections = ImmutableSet.of(column0Handle, column1Handle, columnX);
                                                                             TupleDomain<IcebergColumnHandle> expectedUnenforcedConstraint = TupleDomain.withColumnDomains(
                                                                                     ImmutableMap.of(columnX, Domain.singleValue(BIGINT, 2L)));
-                                                                            return icebergTableHandle.getProjectedColumns().equals(expectedProjections) &&
-                                                                                    unenforcedConstraint.equals(expectedUnenforcedConstraint);
+                                                                            return icebergTableHandle.getEnforcedPredicate().equals(partitionPredicate) &&
+                                                                                    icebergTableHandle.getUnenforcedPredicate().equals(expectedUnenforcedConstraint);
                                                                         },
                                                                         TupleDomain.all(),
-                                                                        ImmutableMap.of("x", equalTo(columnX), "expr_0", equalTo(column0Handle), "t_expr_1", equalTo(column1Handle))))))))));
+                                                                        ImmutableMap.of("x", equalTo(columnX), "expr_0", equalTo(column0Handle))))))
+                                        .right(
+                                                anyTree(
+                                                        tableScan(
+                                                                table -> ((IcebergTableHandle) table).getEnforcedPredicate().equals(partitionPredicate),
+                                                                TupleDomain.all(),
+                                                                ImmutableMap.of())))))));
     }
 
     @Test

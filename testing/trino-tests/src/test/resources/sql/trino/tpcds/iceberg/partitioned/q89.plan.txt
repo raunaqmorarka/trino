@@ -11,15 +11,15 @@ local exchange (GATHER, SINGLE, [])
                                         join (INNER, REPLICATED):
                                             join (INNER, REPLICATED):
                                                 join (INNER, REPLICATED):
-                                                    partial aggregation over (ss_store_sk, ss_sold_date_sk, ss_item_sk)
-                                                        dynamic filter (ss_store_sk::EQUAL, ss_sold_date_sk::EQUAL, ss_item_sk::EQUAL)
+                                                    partial aggregation over (ss_store_sk, ss_item_sk, ss_sold_date_sk)
+                                                        dynamic filter (ss_store_sk::EQUAL, ss_item_sk::EQUAL, ss_sold_date_sk::EQUAL)
                                                             scan store_sales
                                                     local exchange (GATHER, SINGLE, [])
                                                         remote exchange (REPLICATE, BROADCAST, [])
-                                                            scan item
+                                                            scan date_dim
                                                 local exchange (GATHER, SINGLE, [])
                                                     remote exchange (REPLICATE, BROADCAST, [])
-                                                        scan date_dim
+                                                        scan item
                                             local exchange (GATHER, SINGLE, [])
                                                 remote exchange (REPLICATE, BROADCAST, [])
                                                     scan store

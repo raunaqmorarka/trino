@@ -4766,7 +4766,7 @@ public abstract class BaseIcebergConnectorTest
                 "test_predicate_on_data_column_for_partitioned_table_is_not_pushed_down",
                 "(a integer, dt date) WITH (partitioning = ARRAY['dt'])")) {
             assertThat(query("SELECT * FROM " + testTable.getName() + " WHERE a = 10"))
-                    .isNotFullyPushedDown(FilterNode.class);
+                    .isReplacedWithEmptyValues();
             assertUpdate("INSERT INTO " + testTable.getName() + " VALUES (10, date '2025-02-18')", 1);
             assertThat(query("SELECT * FROM " + testTable.getName() + " WHERE a = 10"))
                     .isNotFullyPushedDown(FilterNode.class);
@@ -5252,7 +5252,7 @@ public abstract class BaseIcebergConnectorTest
         verifySplitCount("SELECT * FROM " + tableName, 5);
         verifySplitCount("SELECT * FROM " + tableName + " WHERE regionkey = 3", 1);
         verifySplitCount("SELECT * FROM " + tableName + " WHERE regionkey < 2", 2);
-        verifySplitCount("SELECT * FROM " + tableName + " WHERE regionkey < 0", 0);
+        assertThat(query("SELECT * FROM " + tableName + " WHERE regionkey < 0")).isReplacedWithEmptyValues();
         verifySplitCount("SELECT * FROM " + tableName + " WHERE regionkey > 1 AND regionkey < 4", 2);
         verifySplitCount("SELECT * FROM " + tableName + " WHERE regionkey % 5 = 3", 1);
 
@@ -7917,8 +7917,8 @@ public abstract class BaseIcebergConnectorTest
         assertUpdate("INSERT INTO " + tableName + " VALUES ('two', 1)", 1);
         assertUpdate("INSERT INTO " + tableName + " VALUES ('two', 2)", 1);
         assertUpdate("DELETE FROM " + tableName + " WHERE key = 'one'", 3);
-        assertUpdate("DELETE FROM " + tableName + " WHERE key = 'one'"); // TODO change this when iceberg will guarantee to always return this (https://github.com/apache/iceberg/issues/4647)
-        assertUpdate("DELETE FROM " + tableName + " WHERE key = 'three'");
+        assertUpdate("DELETE FROM " + tableName + " WHERE key = 'one'", 0);
+        assertUpdate("DELETE FROM " + tableName + " WHERE key = 'three'", 0);
         assertUpdate("DELETE FROM " + tableName + " WHERE key = 'two'", 2);
     }
 
@@ -9917,7 +9917,7 @@ public abstract class BaseIcebergConnectorTest
         String errorMessage = "Filter required for tpch\\." + tableName1 + " on at least one of the partition columns: ds";
         assertQueryFails(session, "ALTER TABLE " + tableName1 + " EXECUTE optimize", errorMessage);
         assertQueryFails(session, "UPDATE " + tableName1 + " SET a = 'New'", errorMessage);
-        assertQueryFails(session, "MERGE INTO " + tableName1 + " AS a USING " + tableName2 + " AS b ON (a.ds = b.ds) WHEN MATCHED THEN UPDATE SET a = 'New'", errorMessage);
+        assertQueryFails(session, "MERGE INTO " + tableName1 + " AS a USING " + tableName2 + " AS b ON (a.ds = b.ds) WHEN MATCHED THEN UPDATE SET a = 'New'", "Filter required for tpch\\." + tableName2 + " on at least one of the partition columns: ds");
         assertQueryFails(session, "DELETE FROM " + tableName1 + " WHERE a = '1'", errorMessage);
 
         // Adding partition filters to each solves the problem

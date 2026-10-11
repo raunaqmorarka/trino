@@ -4,25 +4,25 @@ local exchange (GATHER, SINGLE, [])
             local exchange (REPARTITION, ROUND_ROBIN, [])
                 cross join:
                     join (LEFT, REPLICATED):
-                        join (INNER, REPLICATED):
+                        join (INNER, PARTITIONED):
                             final aggregation over (cr_returning_customer_sk, ca_state)
                                 local exchange (GATHER, SINGLE, [])
-                                    remote exchange (REPARTITION, HASH, [cr_returning_customer_sk, ca_state])
-                                        intermediate aggregation over (cr_returning_customer_sk, ca_state)
+                                    remote exchange (REPARTITION, HASH, [cr_returning_customer_sk])
+                                        partial aggregation over (cr_returning_customer_sk, ca_state)
                                             join (INNER, PARTITIONED):
-                                                remote exchange (REPARTITION, HASH, [cr_returning_addr_sk])
-                                                    partial aggregation over (cr_returning_customer_sk, cr_returning_addr_sk)
+                                                remote exchange (REPARTITION, HASH, [ca_address_sk])
+                                                    dynamic filter (ca_address_sk::EQUAL)
+                                                        scan customer_address
+                                                local exchange (GATHER, SINGLE, [])
+                                                    remote exchange (REPARTITION, HASH, [cr_returning_addr_sk])
                                                         join (INNER, REPLICATED):
-                                                            dynamic filter (cr_returning_customer_sk::EQUAL, cr_returning_addr_sk::EQUAL, cr_returned_date_sk::EQUAL)
+                                                            dynamic filter (cr_returning_customer_sk::EQUAL, cr_returned_date_sk::EQUAL)
                                                                 scan catalog_returns
                                                             local exchange (GATHER, SINGLE, [])
                                                                 remote exchange (REPLICATE, BROADCAST, [])
                                                                     scan date_dim
-                                                local exchange (GATHER, SINGLE, [])
-                                                    remote exchange (REPARTITION, HASH, [ca_address_sk])
-                                                        scan customer_address
                             local exchange (GATHER, SINGLE, [])
-                                remote exchange (REPLICATE, BROADCAST, [])
+                                remote exchange (REPARTITION, HASH, [c_customer_sk])
                                     join (INNER, REPLICATED):
                                         dynamic filter (c_current_addr_sk::EQUAL)
                                             scan customer
@@ -38,19 +38,19 @@ local exchange (GATHER, SINGLE, [])
                                                 final aggregation over (cr_returning_customer_sk_31, ca_state_94)
                                                     local exchange (GATHER, SINGLE, [])
                                                         remote exchange (REPARTITION, HASH, [cr_returning_customer_sk_31, ca_state_94])
-                                                            intermediate aggregation over (cr_returning_customer_sk_31, ca_state_94)
+                                                            partial aggregation over (cr_returning_customer_sk_31, ca_state_94)
                                                                 join (INNER, PARTITIONED):
-                                                                    remote exchange (REPARTITION, HASH, [cr_returning_addr_sk_34])
-                                                                        partial aggregation over (cr_returning_customer_sk_31, cr_returning_addr_sk_34)
+                                                                    remote exchange (REPARTITION, HASH, [ca_address_sk_86])
+                                                                        dynamic filter (ca_address_sk_86::EQUAL)
+                                                                            scan customer_address
+                                                                    local exchange (GATHER, SINGLE, [])
+                                                                        remote exchange (REPARTITION, HASH, [cr_returning_addr_sk_34])
                                                                             join (INNER, REPLICATED):
-                                                                                dynamic filter (cr_returning_addr_sk_34::EQUAL, cr_returned_date_sk_51::EQUAL)
+                                                                                dynamic filter (cr_returned_date_sk_51::EQUAL)
                                                                                     scan catalog_returns
                                                                                 local exchange (GATHER, SINGLE, [])
                                                                                     remote exchange (REPLICATE, BROADCAST, [])
                                                                                         scan date_dim
-                                                                    local exchange (GATHER, SINGLE, [])
-                                                                        remote exchange (REPARTITION, HASH, [ca_address_sk_86])
-                                                                            scan customer_address
                     local exchange (GATHER, SINGLE, [])
                         remote exchange (REPLICATE, BROADCAST, [])
                             single aggregation over ()

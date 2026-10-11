@@ -180,6 +180,7 @@ public class TestTrinoGlueCatalog
                     newDirectExecutorService(),
                     0,
                     ZERO,
+                    1000,
                     ConnectorExpressionEvaluator.NO_OP);
             assertThat(icebergMetadata.schemaExists(SESSION, databaseName)).as("icebergMetadata.schemaExists(databaseName)")
                     .isFalse();

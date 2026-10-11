@@ -55,6 +55,7 @@ public class IcebergMetadataFactory
     private final DeletionVectorWriter deletionVectorWriter;
     private final int materializedViewRefreshMaxSnapshotsToExpire;
     private final Duration materializedViewRefreshSnapshotRetentionPeriod;
+    private final int domainCompactionThreshold;
     private final ConnectorExpressionEvaluator evaluator;
 
     @Inject
@@ -103,6 +104,7 @@ public class IcebergMetadataFactory
         this.icebergFileDeleteExecutor = requireNonNull(icebergFileDeleteExecutor, "icebergFileDeleteExecutor is null");
         this.materializedViewRefreshMaxSnapshotsToExpire = config.getMaterializedViewRefreshMaxSnapshotsToExpire();
         this.materializedViewRefreshSnapshotRetentionPeriod = config.getMaterializedViewRefreshSnapshotRetentionPeriod();
+        this.domainCompactionThreshold = config.getDomainCompactionThreshold();
         this.evaluator = requireNonNull(evaluator, "evaluator is null");
     }
 
@@ -126,6 +128,7 @@ public class IcebergMetadataFactory
                 icebergFileDeleteExecutor,
                 materializedViewRefreshMaxSnapshotsToExpire,
                 materializedViewRefreshSnapshotRetentionPeriod,
+                domainCompactionThreshold,
                 evaluator);
     }
 }

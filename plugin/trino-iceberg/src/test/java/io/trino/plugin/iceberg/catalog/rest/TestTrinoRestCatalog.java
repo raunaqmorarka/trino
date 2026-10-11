@@ -254,6 +254,7 @@ public class TestTrinoRestCatalog
                     newDirectExecutorService(),
                     0,
                     ZERO,
+                    1000,
                     ConnectorExpressionEvaluator.NO_OP);
             assertThat(icebergMetadata.schemaExists(SESSION, namespace)).as("icebergMetadata.schemaExists(namespace)")
                     .isTrue();
