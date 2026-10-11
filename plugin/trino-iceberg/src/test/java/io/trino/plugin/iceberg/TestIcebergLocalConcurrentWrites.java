@@ -30,6 +30,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.stream.Collectors;
@@ -1427,6 +1428,51 @@ final class TestIcebergLocalConcurrentWrites
         finally {
             executor.shutdownNow();
             assertThat(executor.awaitTermination(10, SECONDS)).isTrue();
+        }
+    }
+
+    @Test
+    void testConcurrentMergeInsertingSameKeyIntoDifferentPartitions()
+            throws Exception
+    {
+        String delayTable = "blackhole.default.delay_" + randomNameSuffix();
+        assertUpdate("CREATE TABLE " + delayTable + " (dummy INTEGER) WITH (split_count = 1, pages_per_split = 1, rows_per_page = 1, page_processing_delay = '10s')");
+        ExecutorService executor = newFixedThreadPool(1);
+        try (TestTable table = newTrinoTable(
+                "test_concurrent_merge_same_key",
+                "(id BIGINT, v VARCHAR, dt VARCHAR) WITH (partitioning = ARRAY['dt'])",
+                ImmutableList.of("1, 'seed', 'd0'"))) {
+            Future<?> slowMerge = executor.submit(() -> getQueryRunner().execute(
+                    """
+                    MERGE INTO %s t
+                    USING (SELECT CAST(6001 AS BIGINT) AS id, CAST('slow' AS VARCHAR) AS v, CAST('d1' AS VARCHAR) AS dt FROM %s) AS s
+                    ON t.id = s.id
+                    WHEN MATCHED THEN UPDATE SET v = s.v
+                    WHEN NOT MATCHED THEN INSERT (id, v, dt) VALUES (s.id, s.v, s.dt)
+                    """.formatted(table.getName(), delayTable)));
+            Thread.sleep(2_000);
+            assertUpdate(
+                    """
+                    MERGE INTO %s t
+                    USING (VALUES (CAST(6001 AS BIGINT), CAST('fast' AS VARCHAR), CAST('d2' AS VARCHAR))) AS s(id, v, dt)
+                    ON t.id = s.id
+                    WHEN MATCHED THEN UPDATE SET v = s.v
+                    WHEN NOT MATCHED THEN INSERT (id, v, dt) VALUES (s.id, s.v, s.dt)
+                    """.formatted(table.getName()),
+                    1);
+
+            try {
+                slowMerge.get(60, SECONDS);
+            }
+            catch (ExecutionException e) {
+                assertThat(getTrinoExceptionCause(e)).hasMessageContaining("Found conflicting files that can contain records matching");
+            }
+            assertThat(computeScalar("SELECT count(*) FROM " + table.getName() + " WHERE id = 6001")).isEqualTo(1L);
+        }
+        finally {
+            executor.shutdownNow();
+            assertThat(executor.awaitTermination(10, SECONDS)).isTrue();
+            assertUpdate("DROP TABLE " + delayTable);
         }
     }
 
