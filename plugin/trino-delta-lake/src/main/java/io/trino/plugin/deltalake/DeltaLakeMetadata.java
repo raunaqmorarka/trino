@@ -117,6 +117,7 @@ import io.trino.spi.connector.ConnectorOutputTableHandle;
 import io.trino.spi.connector.ConnectorPartitioningHandle;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableCredentials;
+import io.trino.spi.connector.ConnectorTableDependency;
 import io.trino.spi.connector.ConnectorTableExecuteHandle;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTableLayout;
@@ -2878,13 +2879,16 @@ public class DeltaLakeMetadata
     public Optional<ConnectorOutputMetadata> finishMerge(
             ConnectorSession session,
             ConnectorMergeTableHandle mergeTableHandle,
-            List<ConnectorTableHandle> sourceTableHandles,
+            List<ConnectorTableDependency> tableDependencies,
             Collection<Slice> fragments,
             Collection<ComputedStatistics> computedStatistics)
     {
         DeltaLakeMergeTableHandle mergeHandle = (DeltaLakeMergeTableHandle) mergeTableHandle;
         DeltaLakeTableHandle handle = mergeHandle.tableHandle();
         Optional<DeltaLakeTableCredentials> tableCredentials = getTableCredentials(handle.toCredentialsHandle());
+        List<ConnectorTableHandle> sourceTableHandles = tableDependencies.stream()
+                .map(ConnectorTableDependency::tableHandle)
+                .collect(toImmutableList());
 
         List<DeltaLakeMergeResult> mergeResults = fragments.stream()
                 .map(Slice::getInput)

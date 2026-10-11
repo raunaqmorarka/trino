@@ -57,6 +57,7 @@ import io.trino.spi.connector.ConnectorPartitioningHandle;
 import io.trino.spi.connector.ConnectorResolvedIndex;
 import io.trino.spi.connector.ConnectorSession;
 import io.trino.spi.connector.ConnectorTableCredentials;
+import io.trino.spi.connector.ConnectorTableDependency;
 import io.trino.spi.connector.ConnectorTableExecuteHandle;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTableMetadata;
@@ -1460,15 +1461,15 @@ public final class MetadataManager
     }
 
     @Override
-    public Optional<ConnectorOutputMetadata> finishMerge(Session session, MergeHandle mergeHandle, List<TableHandle> sourceTableHandles, Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics)
+    public Optional<ConnectorOutputMetadata> finishMerge(Session session, MergeHandle mergeHandle, List<TableDependency> tableDependencies, Collection<Slice> fragments, Collection<ComputedStatistics> computedStatistics)
     {
         CatalogHandle catalogHandle = mergeHandle.tableHandle().catalogHandle();
         ConnectorMetadata metadata = getMetadata(session, catalogHandle);
-        List<ConnectorTableHandle> sourceConnectorHandles = sourceTableHandles.stream()
-                .filter(handle -> handle.catalogHandle().equals(catalogHandle))
-                .map(TableHandle::connectorHandle)
+        List<ConnectorTableDependency> connectorTableDependencies = tableDependencies.stream()
+                .filter(dependency -> dependency.tableHandle().catalogHandle().equals(catalogHandle))
+                .map(TableDependency::toConnectorTableDependency)
                 .collect(toImmutableList());
-        return metadata.finishMerge(session.toConnectorSession(catalogHandle), mergeHandle.connectorMergeHandle(), sourceConnectorHandles, fragments, computedStatistics);
+        return metadata.finishMerge(session.toConnectorSession(catalogHandle), mergeHandle.connectorMergeHandle(), connectorTableDependencies, fragments, computedStatistics);
     }
 
     @Override

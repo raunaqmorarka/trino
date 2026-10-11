@@ -39,6 +39,7 @@ import io.trino.sql.PlannerContext;
 import io.trino.sql.planner.PlanNodeIdAllocator;
 import io.trino.sql.planner.RuleStatsRecorder;
 import io.trino.sql.planner.SymbolAllocator;
+import io.trino.sql.planner.TableDependencyCollector;
 import io.trino.sql.planner.optimizations.AdaptivePlanOptimizer;
 import io.trino.sql.planner.optimizations.PlanOptimizer;
 import io.trino.sql.planner.plan.PlanNode;
@@ -126,7 +127,8 @@ public class IterativeOptimizer
                 context.session(),
                 context.warningCollector(),
                 context.tableStatsProvider(),
-                context.runtimeInfoProvider());
+                context.runtimeInfoProvider(),
+                context.tableDependencyCollector());
         exploreGroup(memo.getRootGroup(), optimizerContext, changedPlanNodeIds);
         context.planOptimizersStatsCollector().add(optimizerContext.getIterativeOptimizerStatsCollector());
         return new Result(memo.extract(), ImmutableSet.copyOf(changedPlanNodeIds));
@@ -331,6 +333,12 @@ public class IterativeOptimizer
             {
                 return context.warningCollector;
             }
+
+            @Override
+            public TableDependencyCollector getTableDependencyCollector()
+            {
+                return context.tableDependencyCollector;
+            }
         };
     }
 
@@ -346,6 +354,7 @@ public class IterativeOptimizer
         private final WarningCollector warningCollector;
         private final TableStatsProvider tableStatsProvider;
         private final RuntimeInfoProvider runtimeStatsProvider;
+        private final TableDependencyCollector tableDependencyCollector;
 
         private final PlanOptimizersStatsCollector iterativeOptimizerStatsCollector;
 
@@ -359,7 +368,8 @@ public class IterativeOptimizer
                 Session session,
                 WarningCollector warningCollector,
                 TableStatsProvider tableStatsProvider,
-                RuntimeInfoProvider runtimeStatsProvider)
+                RuntimeInfoProvider runtimeStatsProvider,
+                TableDependencyCollector tableDependencyCollector)
         {
             checkArgument(timeoutInMilliseconds >= 0, "Timeout has to be a non-negative number [milliseconds]");
 
@@ -374,6 +384,7 @@ public class IterativeOptimizer
             this.iterativeOptimizerStatsCollector = createPlanOptimizersStatsCollector();
             this.tableStatsProvider = tableStatsProvider;
             this.runtimeStatsProvider = runtimeStatsProvider;
+            this.tableDependencyCollector = tableDependencyCollector;
         }
 
         public void checkTimeoutNotExhausted()

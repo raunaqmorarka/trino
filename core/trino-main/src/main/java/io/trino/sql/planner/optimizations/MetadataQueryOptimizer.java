@@ -34,6 +34,7 @@ import io.trino.sql.ir.Row;
 import io.trino.sql.planner.DeterminismEvaluator;
 import io.trino.sql.planner.PlanNodeIdAllocator;
 import io.trino.sql.planner.Symbol;
+import io.trino.sql.planner.TableDependencyCollector;
 import io.trino.sql.planner.plan.AggregationNode;
 import io.trino.sql.planner.plan.AggregationNode.Aggregation;
 import io.trino.sql.planner.plan.DistinctLimitNode;
@@ -82,7 +83,7 @@ public class MetadataQueryOptimizer
         if (!SystemSessionProperties.isOptimizeMetadataQueries(context.session())) {
             return plan;
         }
-        return SimplePlanRewriter.rewriteWith(new Optimizer(context.session(), plannerContext, context.idAllocator()), plan, null);
+        return SimplePlanRewriter.rewriteWith(new Optimizer(context.session(), plannerContext, context.idAllocator(), context.tableDependencyCollector()), plan);
     }
 
     private static class Optimizer
@@ -91,12 +92,14 @@ public class MetadataQueryOptimizer
         private final PlanNodeIdAllocator idAllocator;
         private final Session session;
         private final PlannerContext plannerContext;
+        private final TableDependencyCollector tableDependencyCollector;
 
-        private Optimizer(Session session, PlannerContext plannerContext, PlanNodeIdAllocator idAllocator)
+        private Optimizer(Session session, PlannerContext plannerContext, PlanNodeIdAllocator idAllocator, TableDependencyCollector tableDependencyCollector)
         {
             this.session = session;
             this.plannerContext = plannerContext;
             this.idAllocator = idAllocator;
+            this.tableDependencyCollector = requireNonNull(tableDependencyCollector, "tableDependencyCollector is null");
         }
 
         @Override
@@ -178,6 +181,8 @@ public class MetadataQueryOptimizer
                 }
             }
 
+            // The rows now come from table metadata, so a write still depends on the table contents
+            tableDependencyCollector.addMetadataRead(tableScan.getTable());
             // replace the tablescan node with a values node
             return Optional.of(new ValuesNode(idAllocator.getNextId(), inputs, rowsBuilder.build()));
         }

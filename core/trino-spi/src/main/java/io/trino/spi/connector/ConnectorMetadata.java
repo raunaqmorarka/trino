@@ -953,7 +953,8 @@ public interface ConnectorMetadata
      *
      * @param session The session
      * @param mergeTableHandle A ConnectorMergeTableHandle for the table that is the target of the merge
-     * @param sourceTableHandles All source table handles belonging to the connector from which the operation is reading data
+     * @param tableDependencies All tables belonging to the connector whose rows the plan depends on, including
+     *         reads whose scans were resolved from table properties or removed as empty before execution
      * @param fragments All fragments returned by the merge plan
      * @param computedStatistics Statistics for the table, meaningful only to the connector that produced them.
      * @return ConnectorOutputMetadata that will be populated in the query output
@@ -961,7 +962,7 @@ public interface ConnectorMetadata
     default Optional<ConnectorOutputMetadata> finishMerge(
             ConnectorSession session,
             ConnectorMergeTableHandle mergeTableHandle,
-            List<ConnectorTableHandle> sourceTableHandles,
+            List<ConnectorTableDependency> tableDependencies,
             Collection<Slice> fragments,
             Collection<ComputedStatistics> computedStatistics)
     {

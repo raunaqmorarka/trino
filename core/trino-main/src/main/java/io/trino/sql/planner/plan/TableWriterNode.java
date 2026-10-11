@@ -27,6 +27,7 @@ import io.trino.metadata.MergeHandle;
 import io.trino.metadata.Metadata;
 import io.trino.metadata.OutputTableHandle;
 import io.trino.metadata.QualifiedObjectName;
+import io.trino.metadata.TableDependency;
 import io.trino.metadata.TableExecuteHandle;
 import io.trino.metadata.TableHandle;
 import io.trino.metadata.TableLayout;
@@ -747,7 +748,7 @@ public class TableWriterNode
         private final Optional<MergeHandle> mergeHandle;
         private final SchemaTableName schemaTableName;
         private final MergeParadigmAndTypes mergeParadigmAndTypes;
-        private final List<TableHandle> sourceTableHandles;
+        private final List<TableDependency> tableDependencies;
         private final Multimap<Integer, ColumnHandle> updateCaseColumnHandles;
 
         @JsonCreator
@@ -756,14 +757,14 @@ public class TableWriterNode
                 @JsonProperty("mergeHandle") Optional<MergeHandle> mergeHandle,
                 @JsonProperty("schemaTableName") SchemaTableName schemaTableName,
                 @JsonProperty("mergeParadigmAndTypes") MergeParadigmAndTypes mergeParadigmAndTypes,
-                @JsonProperty("sourceTableHandles") List<TableHandle> sourceTableHandles,
+                @JsonProperty("tableDependencies") List<TableDependency> tableDependencies,
                 @JsonProperty("updateCaseColumnHandles") Multimap<Integer, ColumnHandle> updateCaseColumnHandles)
         {
             this.handle = requireNonNull(handle, "handle is null");
             this.mergeHandle = requireNonNull(mergeHandle, "mergeHandle is null");
             this.schemaTableName = requireNonNull(schemaTableName, "schemaTableName is null");
             this.mergeParadigmAndTypes = requireNonNull(mergeParadigmAndTypes, "mergeElements is null");
-            this.sourceTableHandles = ImmutableList.copyOf(requireNonNull(sourceTableHandles, "sourceTableHandles is null"));
+            this.tableDependencies = ImmutableList.copyOf(requireNonNull(tableDependencies, "tableDependencies is null"));
             this.updateCaseColumnHandles = requireNonNull(updateCaseColumnHandles, "updateCaseColumnHandles is null");
         }
 
@@ -816,9 +817,9 @@ public class TableWriterNode
         }
 
         @JsonProperty
-        public List<TableHandle> getSourceTableHandles()
+        public List<TableDependency> getTableDependencies()
         {
-            return sourceTableHandles;
+            return tableDependencies;
         }
 
         @JsonProperty

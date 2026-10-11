@@ -37,6 +37,7 @@ import io.trino.sql.ir.Reference;
 import io.trino.sql.planner.Plan;
 import io.trino.sql.planner.PlanNodeIdAllocator;
 import io.trino.sql.planner.Symbol;
+import io.trino.sql.planner.TableDependencyCollector;
 import io.trino.sql.planner.assertions.BasePlanTest;
 import io.trino.sql.planner.assertions.DynamicFilterConsumerMatcher;
 import io.trino.sql.planner.assertions.PlanAssert;
@@ -519,7 +520,8 @@ public class TestRemoveUnsupportedDynamicFilters
                             WarningCollector.NOOP,
                             createPlanOptimizersStatsCollector(),
                             new CachingTableStatsProvider(metadata, session, () -> false),
-                            RuntimeInfoProvider.noImplementation()));
+                            RuntimeInfoProvider.noImplementation(),
+                            new TableDependencyCollector()));
             new DynamicFiltersChecker().validate(
                     rewrittenPlan,
                     session,

@@ -38,6 +38,7 @@ import io.trino.sql.planner.PlanNodeIdAllocator;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.SymbolAllocator;
 import io.trino.sql.planner.SymbolsExtractor;
+import io.trino.sql.planner.TableDependencyCollector;
 import io.trino.sql.planner.plan.AggregationNode;
 import io.trino.sql.planner.plan.AssignUniqueId;
 import io.trino.sql.planner.plan.Assignments;
@@ -141,7 +142,7 @@ public class PredicatePushDown
         requireNonNull(plan, "plan is null");
 
         return SimplePlanRewriter.rewriteWith(
-                new Rewriter(context.symbolAllocator(), context.idAllocator(), plannerContext, context.session(), useTableProperties, dynamicFiltering),
+                new Rewriter(context.symbolAllocator(), context.idAllocator(), plannerContext, context.session(), useTableProperties, dynamicFiltering, context.tableDependencyCollector()),
                 plan,
                 TRUE);
     }
@@ -165,7 +166,8 @@ public class PredicatePushDown
                 PlannerContext plannerContext,
                 Session session,
                 boolean useTableProperties,
-                boolean dynamicFiltering)
+                boolean dynamicFiltering,
+                TableDependencyCollector tableDependencyCollector)
         {
             this.symbolAllocator = requireNonNull(symbolAllocator, "symbolAllocator is null");
             this.idAllocator = requireNonNull(idAllocator, "idAllocator is null");
@@ -176,7 +178,8 @@ public class PredicatePushDown
 
             this.effectivePredicateExtractor = new EffectivePredicateExtractor(
                     plannerContext,
-                    useTableProperties && isPredicatePushdownUseTableProperties(session));
+                    useTableProperties && isPredicatePushdownUseTableProperties(session),
+                    tableDependencyCollector);
             optimizer = plannerContext.getExpressionOptimizer();
             this.allowUnsafePushdown = SystemSessionProperties.isUnsafePushdownAllowed(session);
         }

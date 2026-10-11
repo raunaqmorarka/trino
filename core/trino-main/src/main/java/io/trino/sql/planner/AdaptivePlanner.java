@@ -243,7 +243,9 @@ public class AdaptivePlanner
                             warningCollector,
                             planOptimizersStatsCollector,
                             tableStatsProvider,
-                            runtimeInfoProvider));
+                            runtimeInfoProvider,
+                            // Adaptive optimizers only re-partition and reorder joins, so they record no table dependencies
+                            new TableDependencyCollector()));
             changedPlanNodes.addAll(result.changedPlanNodes());
         }
         return new AdaptivePlanOptimizer.Result(result.plan(), changedPlanNodes.build());

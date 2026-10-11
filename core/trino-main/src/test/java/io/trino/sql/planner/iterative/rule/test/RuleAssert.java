@@ -32,6 +32,7 @@ import io.trino.sql.planner.Plan;
 import io.trino.sql.planner.PlanNodeIdAllocator;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.SymbolAllocator;
+import io.trino.sql.planner.TableDependencyCollector;
 import io.trino.sql.planner.assertions.PlanMatchPattern;
 import io.trino.sql.planner.iterative.Lookup;
 import io.trino.sql.planner.iterative.Memo;
@@ -233,6 +234,12 @@ public class RuleAssert
             public WarningCollector getWarningCollector()
             {
                 return WarningCollector.NOOP;
+            }
+
+            @Override
+            public TableDependencyCollector getTableDependencyCollector()
+            {
+                return new TableDependencyCollector();
             }
         };
     }

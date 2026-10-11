@@ -194,6 +194,7 @@ public class LogicalPlanner
     private final List<PlanOptimizer> planOptimizers;
     private final PlanSanityChecker planSanityChecker;
     private final SymbolAllocator symbolAllocator = new SymbolAllocator(ImmutableList.of());
+    private final TableDependencyCollector tableDependencyCollector = new TableDependencyCollector();
     private final Metadata metadata;
     private final PlannerContext plannerContext;
     private final StatisticsAggregationPlanner statisticsAggregationPlanner;
@@ -314,7 +315,7 @@ public class LogicalPlanner
     {
         PlanNode result;
         try (var _ = optimizerSpan(optimizer)) {
-            result = optimizer.optimize(root, new PlanOptimizer.Context(session, symbolAllocator, idAllocator, warningCollector, planOptimizersStatsCollector, tableStatsProvider, RuntimeInfoProvider.noImplementation()));
+            result = optimizer.optimize(root, new PlanOptimizer.Context(session, symbolAllocator, idAllocator, warningCollector, planOptimizersStatsCollector, tableStatsProvider, RuntimeInfoProvider.noImplementation(), tableDependencyCollector));
         }
         if (result == null) {
             throw new NullPointerException(optimizer.getClass().getName() + " returned a null plan");

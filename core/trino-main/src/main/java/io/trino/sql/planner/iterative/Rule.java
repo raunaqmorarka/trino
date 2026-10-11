@@ -21,6 +21,7 @@ import io.trino.matching.Captures;
 import io.trino.matching.Pattern;
 import io.trino.sql.planner.PlanNodeIdAllocator;
 import io.trino.sql.planner.SymbolAllocator;
+import io.trino.sql.planner.TableDependencyCollector;
 import io.trino.sql.planner.plan.PlanNode;
 
 import java.util.Optional;
@@ -58,6 +59,8 @@ public interface Rule<T>
         void checkTimeoutNotExhausted();
 
         WarningCollector getWarningCollector();
+
+        TableDependencyCollector getTableDependencyCollector();
     }
 
     record Result(Optional<PlanNode> transformedPlan)

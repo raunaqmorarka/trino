@@ -42,6 +42,7 @@ import io.trino.sql.planner.DomainTranslator;
 import io.trino.sql.planner.EngineExpressions;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.SymbolAllocator;
+import io.trino.sql.planner.TableDependencyCollector;
 import io.trino.sql.planner.iterative.Rule;
 import io.trino.sql.planner.plan.FilterNode;
 import io.trino.sql.planner.plan.PlanNode;
@@ -117,7 +118,8 @@ public class PushPredicateIntoTableScan
                 context.getSession(),
                 plannerContext,
                 context.getStatsProvider(),
-                context.getSymbolAllocator());
+                context.getSymbolAllocator(),
+                context.getTableDependencyCollector());
 
         if (rewritten.isEmpty() || arePlansSame(filterNode, tableScan, rewritten.get())) {
             return Result.empty();
@@ -151,7 +153,8 @@ public class PushPredicateIntoTableScan
             Session session,
             PlannerContext plannerContext,
             StatsProvider statsProvider,
-            SymbolAllocator symbolAllocator)
+            SymbolAllocator symbolAllocator,
+            TableDependencyCollector tableDependencyCollector)
     {
         if (!isAllowPushdownIntoConnectors(session)) {
             return Optional.empty();
@@ -236,6 +239,8 @@ public class PushPredicateIntoTableScan
         TableProperties newTableProperties = plannerContext.getMetadata().getTableProperties(session, newTable);
         Optional<TablePartitioning> newTablePartitioning = newTableProperties.getTablePartitioning();
         if (newTableProperties.getPredicate().isNone()) {
+            // The scan is removed because the table contents cannot match, so a write depends on that staying true
+            tableDependencyCollector.addTablePropertiesPredicate(newTable, TupleDomain.none());
             return Optional.of(new ValuesNode(node.getId(), node.getOutputSymbols()));
         }
 

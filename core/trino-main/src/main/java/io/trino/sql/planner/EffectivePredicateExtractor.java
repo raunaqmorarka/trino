@@ -95,16 +95,18 @@ public class EffectivePredicateExtractor
 
     private final PlannerContext plannerContext;
     private final boolean useTableProperties;
+    private final TableDependencyCollector tableDependencyCollector;
 
-    public EffectivePredicateExtractor(PlannerContext plannerContext, boolean useTableProperties)
+    public EffectivePredicateExtractor(PlannerContext plannerContext, boolean useTableProperties, TableDependencyCollector tableDependencyCollector)
     {
         this.plannerContext = requireNonNull(plannerContext, "plannerContext is null");
         this.useTableProperties = useTableProperties;
+        this.tableDependencyCollector = requireNonNull(tableDependencyCollector, "tableDependencyCollector is null");
     }
 
     public Expression extract(Session session, SymbolAllocator symbolAllocator, PlanNode node)
     {
-        return node.accept(new Visitor(plannerContext, session, symbolAllocator, useTableProperties), null);
+        return node.accept(new Visitor(plannerContext, session, symbolAllocator, useTableProperties, tableDependencyCollector), null);
     }
 
     private static class Visitor
@@ -115,15 +117,17 @@ public class EffectivePredicateExtractor
         private final Session session;
         private final SymbolAllocator symbolAllocator;
         private final boolean useTableProperties;
+        private final TableDependencyCollector tableDependencyCollector;
         private final DomainTranslator domainTranslator;
 
-        public Visitor(PlannerContext plannerContext, Session session, SymbolAllocator symbolAllocator, boolean useTableProperties)
+        public Visitor(PlannerContext plannerContext, Session session, SymbolAllocator symbolAllocator, boolean useTableProperties, TableDependencyCollector tableDependencyCollector)
         {
             this.plannerContext = requireNonNull(plannerContext, "plannerContext is null");
             this.metadata = plannerContext.getMetadata();
             this.session = requireNonNull(session, "session is null");
             this.symbolAllocator = requireNonNull(symbolAllocator, "symbolAllocator is null");
             this.useTableProperties = useTableProperties;
+            this.tableDependencyCollector = requireNonNull(tableDependencyCollector, "tableDependencyCollector is null");
             this.domainTranslator = new DomainTranslator(metadata);
         }
 
@@ -270,6 +274,10 @@ public class EffectivePredicateExtractor
             TupleDomain<ColumnHandle> predicate = node.getEnforcedConstraint();
             if (useTableProperties) {
                 predicate = metadata.getTableProperties(session, node.getTable()).getPredicate();
+                if (!predicate.contains(node.getEnforcedConstraint())) {
+                    // The plan now relies on the table contents, not only on the handle
+                    tableDependencyCollector.addTablePropertiesPredicate(node.getTable(), predicate);
+                }
             }
 
             // TODO: replace with metadata.getTableProperties() when table layouts are fully removed

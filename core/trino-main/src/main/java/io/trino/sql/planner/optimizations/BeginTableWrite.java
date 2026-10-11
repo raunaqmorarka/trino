@@ -18,9 +18,11 @@ import io.trino.cost.StatsAndCosts;
 import io.trino.metadata.FunctionManager;
 import io.trino.metadata.MergeHandle;
 import io.trino.metadata.Metadata;
+import io.trino.metadata.TableDependency;
 import io.trino.metadata.TableExecuteHandle;
 import io.trino.metadata.TableHandle;
 import io.trino.spi.connector.BeginTableExecuteResult;
+import io.trino.sql.planner.TableDependencyCollector;
 import io.trino.sql.planner.plan.ExchangeNode;
 import io.trino.sql.planner.plan.MergeWriterNode;
 import io.trino.sql.planner.plan.PlanNode;
@@ -44,6 +46,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Stream;
 
 import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableList.toImmutableList;
@@ -75,7 +78,7 @@ public class BeginTableWrite
     public PlanNode optimize(PlanNode plan, Context context)
     {
         try {
-            return SimplePlanRewriter.rewriteWith(new Rewriter(context.session()), plan, Optional.empty());
+            return SimplePlanRewriter.rewriteWith(new Rewriter(context.session(), context.tableDependencyCollector()), plan, Optional.empty());
         }
         catch (RuntimeException e) {
             try {
@@ -94,10 +97,12 @@ public class BeginTableWrite
             extends SimplePlanRewriter<Optional<WriterTarget>>
     {
         private final Session session;
+        private final TableDependencyCollector tableDependencyCollector;
 
-        public Rewriter(Session session)
+        public Rewriter(Session session, TableDependencyCollector tableDependencyCollector)
         {
             this.session = session;
+            this.tableDependencyCollector = tableDependencyCollector;
         }
 
         @Override
@@ -212,7 +217,7 @@ public class BeginTableWrite
                         mergeTarget.getMergeHandle(),
                         mergeTarget.getSchemaTableName(),
                         mergeTarget.getMergeParadigmAndTypes(),
-                        findSourceTableHandles(node),
+                        findTableDependencies(node),
                         mergeTarget.getUpdateCaseColumnHandles());
             }
 
@@ -254,7 +259,7 @@ public class BeginTableWrite
                         Optional.of(mergeHandle),
                         merge.getSchemaTableName(),
                         merge.getMergeParadigmAndTypes(),
-                        findSourceTableHandles(planNode),
+                        findTableDependencies(planNode),
                         merge.getUpdateCaseColumnHandles());
             }
             if (target instanceof TableWriterNode.RefreshMaterializedViewReference refreshMV) {
@@ -282,6 +287,16 @@ public class BeginTableWrite
                     .stream()
                     .map(TableScanNode.class::cast)
                     .map(TableScanNode::getTable)
+                    .collect(toImmutableList());
+        }
+
+        private List<TableDependency> findTableDependencies(PlanNode startNode)
+        {
+            return Stream.concat(
+                            findSourceTableHandles(startNode).stream()
+                                    .map(tableHandle -> new TableDependency(tableHandle, Optional.empty())),
+                            tableDependencyCollector.getDependencies().stream())
+                    .distinct()
                     .collect(toImmutableList());
         }
 

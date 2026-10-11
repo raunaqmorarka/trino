@@ -24,6 +24,7 @@ import io.trino.connector.system.GlobalSystemConnector;
 import io.trino.metadata.AbstractMockMetadata;
 import io.trino.metadata.Metadata;
 import io.trino.metadata.ResolvedFunction;
+import io.trino.metadata.TableDependency;
 import io.trino.metadata.TableHandle;
 import io.trino.metadata.TableProperties;
 import io.trino.metadata.TestingFunctionResolution;
@@ -170,8 +171,9 @@ public class TestEffectivePredicateExtractor
     };
     private final PlannerContext plannerContext = plannerContextBuilder().withMetadata(metadata).build();
 
-    private final EffectivePredicateExtractor effectivePredicateExtractor = new EffectivePredicateExtractor(plannerContext, true);
-    private final EffectivePredicateExtractor effectivePredicateExtractorWithoutTableProperties = new EffectivePredicateExtractor(plannerContext, false);
+    private final TableDependencyCollector tableDependencyCollector = new TableDependencyCollector();
+    private final EffectivePredicateExtractor effectivePredicateExtractor = new EffectivePredicateExtractor(plannerContext, true, tableDependencyCollector);
+    private final EffectivePredicateExtractor effectivePredicateExtractorWithoutTableProperties = new EffectivePredicateExtractor(plannerContext, false, new TableDependencyCollector());
 
     private Map<Symbol, ColumnHandle> scanAssignments;
     private TableScanNode baseTableScan;
@@ -485,6 +487,8 @@ public class TestEffectivePredicateExtractor
                 Optional.empty());
         effectivePredicate = effectivePredicateExtractor.extract(SESSION, emptySymbolAllocator(), node);
         assertThat(normalizeConjuncts(effectivePredicate)).isEqualTo(normalizeConjuncts(equals(bigintLiteral(1L), new Reference(BIGINT, "a"))));
+        // Table properties that add nothing to the enforced constraint record no dependency
+        assertThat(tableDependencyCollector.getDependencies()).isEmpty();
 
         predicate = TupleDomain.withColumnDomains(ImmutableMap.of(
                 scanAssignments.get(new Symbol(BIGINT, "a")), Domain.singleValue(BIGINT, 1L),
@@ -512,6 +516,9 @@ public class TestEffectivePredicateExtractor
                 Optional.empty());
         effectivePredicate = effectivePredicateExtractor.extract(SESSION, emptySymbolAllocator(), node);
         assertThat(effectivePredicate).isEqualTo(and(equals(new Reference(BIGINT, "a"), bigintLiteral(1)), equals(new Reference(BIGINT, "b"), bigintLiteral(2))));
+        // Table properties narrower than the enforced constraint record the assumed predicate
+        TableDependency unconstrainedScanDependency = new TableDependency(((TableScanNode) node).getTable(), Optional.of(predicate));
+        assertThat(tableDependencyCollector.getDependencies()).containsExactly(unconstrainedScanDependency);
 
         node = new TableScanNode(
                 newId(),
@@ -526,6 +533,9 @@ public class TestEffectivePredicateExtractor
                 Optional.empty());
         effectivePredicate = effectivePredicateExtractor.extract(SESSION, emptySymbolAllocator(), node);
         assertThat(normalizeConjuncts(effectivePredicate)).isEqualTo(normalizeConjuncts(equals(bigintLiteral(2L), new Reference(BIGINT, "b")), equals(bigintLiteral(1L), new Reference(BIGINT, "a"))));
+        assertThat(tableDependencyCollector.getDependencies()).containsExactly(
+                unconstrainedScanDependency,
+                new TableDependency(((TableScanNode) node).getTable(), Optional.of(predicate)));
 
         node = new TableScanNode(
                 newId(),
@@ -538,6 +548,7 @@ public class TestEffectivePredicateExtractor
                 Optional.empty());
         effectivePredicate = effectivePredicateExtractor.extract(SESSION, emptySymbolAllocator(), node);
         assertThat(effectivePredicate).isEqualTo(TRUE);
+        assertThat(tableDependencyCollector.getDependencies()).hasSize(2);
     }
 
     @Test

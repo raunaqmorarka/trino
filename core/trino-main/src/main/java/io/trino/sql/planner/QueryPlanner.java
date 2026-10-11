@@ -56,7 +56,6 @@ import io.trino.sql.ir.IsNull;
 import io.trino.sql.ir.Row;
 import io.trino.sql.ir.WhenClause;
 import io.trino.sql.planner.RelationPlanner.PatternRecognitionComponents;
-import io.trino.sql.planner.optimizations.PlanNodeSearcher;
 import io.trino.sql.planner.plan.AggregationNode;
 import io.trino.sql.planner.plan.AggregationNode.Aggregation;
 import io.trino.sql.planner.plan.AssignUniqueId;
@@ -76,7 +75,6 @@ import io.trino.sql.planner.plan.PlanNode;
 import io.trino.sql.planner.plan.ProjectNode;
 import io.trino.sql.planner.plan.SimplePlanRewriter;
 import io.trino.sql.planner.plan.SortNode;
-import io.trino.sql.planner.plan.TableScanNode;
 import io.trino.sql.planner.plan.TableWriterNode.MergeParadigmAndTypes;
 import io.trino.sql.planner.plan.TableWriterNode.MergeTarget;
 import io.trino.sql.planner.plan.UnionNode;
@@ -791,7 +789,8 @@ class QueryPlanner
                         Optional.empty(),
                         tableMetadata.table(),
                         paradigmAndTypes,
-                        findSourceTableHandles(projectNode),
+                        // BeginTableWrite computes the dependencies from the optimized plan
+                        ImmutableList.of(),
                         ImmutableListMultimap.of()),
                 projectNode.getOutputSymbols(),
                 partitioningScheme,
@@ -1184,7 +1183,8 @@ class QueryPlanner
                 Optional.empty(),
                 metadata.getTableName(session, handle).getSchemaTableName(),
                 mergeParadigmAndTypes,
-                findSourceTableHandles(planNode),
+                // BeginTableWrite computes the dependencies from the optimized plan
+                ImmutableList.of(),
                 mergeAnalysis.getUpdateCaseColumnHandles());
 
         ImmutableList.Builder<Symbol> columnSymbolsBuilder = ImmutableList.builder();
@@ -1240,17 +1240,6 @@ class QueryPlanner
                 projectedSymbols,
                 partitioningScheme,
                 outputs);
-    }
-
-    private static List<TableHandle> findSourceTableHandles(PlanNode startNode)
-    {
-        return PlanNodeSearcher.searchFrom(startNode)
-                .where(TableScanNode.class::isInstance)
-                .findAll()
-                .stream()
-                .map(TableScanNode.class::cast)
-                .map(TableScanNode::getTable)
-                .collect(toImmutableList());
     }
 
     private static int getMergeCaseOperationNumber(MergeCase mergeCase)

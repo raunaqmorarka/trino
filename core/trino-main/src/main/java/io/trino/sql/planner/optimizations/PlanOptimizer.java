@@ -20,6 +20,7 @@ import io.trino.execution.querystats.PlanOptimizersStatsCollector;
 import io.trino.execution.warnings.WarningCollector;
 import io.trino.sql.planner.PlanNodeIdAllocator;
 import io.trino.sql.planner.SymbolAllocator;
+import io.trino.sql.planner.TableDependencyCollector;
 import io.trino.sql.planner.plan.PlanNode;
 
 import static java.util.Objects.requireNonNull;
@@ -35,7 +36,8 @@ public interface PlanOptimizer
             WarningCollector warningCollector,
             PlanOptimizersStatsCollector planOptimizersStatsCollector,
             TableStatsProvider tableStatsProvider,
-            RuntimeInfoProvider runtimeInfoProvider)
+            RuntimeInfoProvider runtimeInfoProvider,
+            TableDependencyCollector tableDependencyCollector)
     {
         public Context(
                 Session session,
@@ -44,7 +46,8 @@ public interface PlanOptimizer
                 WarningCollector warningCollector,
                 PlanOptimizersStatsCollector planOptimizersStatsCollector,
                 TableStatsProvider tableStatsProvider,
-                RuntimeInfoProvider runtimeInfoProvider)
+                RuntimeInfoProvider runtimeInfoProvider,
+                TableDependencyCollector tableDependencyCollector)
         {
             this.session = requireNonNull(session, "session is null");
             this.symbolAllocator = requireNonNull(symbolAllocator, "symbolAllocator is null");
@@ -53,6 +56,7 @@ public interface PlanOptimizer
             this.tableStatsProvider = requireNonNull(tableStatsProvider, "tableStatsProvider is null");
             this.planOptimizersStatsCollector = requireNonNull(planOptimizersStatsCollector, "planOptimizersStatsCollector is null");
             this.runtimeInfoProvider = requireNonNull(runtimeInfoProvider, "runtimeInfoProvider is null");
+            this.tableDependencyCollector = requireNonNull(tableDependencyCollector, "tableDependencyCollector is null");
         }
     }
 }

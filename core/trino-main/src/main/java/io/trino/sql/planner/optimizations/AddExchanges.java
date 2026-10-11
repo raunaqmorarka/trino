@@ -45,6 +45,7 @@ import io.trino.sql.planner.PlanNodeIdAllocator;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.SymbolAllocator;
 import io.trino.sql.planner.SystemPartitioningHandle;
+import io.trino.sql.planner.TableDependencyCollector;
 import io.trino.sql.planner.iterative.rule.DetermineTableScanNodePartitioning;
 import io.trino.sql.planner.iterative.rule.PushPredicateIntoTableScan;
 import io.trino.sql.planner.plan.AggregationNode;
@@ -165,7 +166,7 @@ public class AddExchanges
     public PlanNode optimize(PlanNode plan, Context context)
     {
         PlanWithProperties result = plan.accept(
-                new Rewriter(context.idAllocator(), context.symbolAllocator(), context.session(), context.tableStatsProvider()),
+                new Rewriter(context.idAllocator(), context.symbolAllocator(), context.session(), context.tableStatsProvider(), context.tableDependencyCollector()),
                 PreferredProperties.any());
         return result.getNode();
     }
@@ -181,13 +182,15 @@ public class AddExchanges
         private final StatsProvider statsProvider;
         private final Session session;
         private final boolean redistributeWrites;
+        private final TableDependencyCollector tableDependencyCollector;
 
-        public Rewriter(PlanNodeIdAllocator idAllocator, SymbolAllocator symbolAllocator, Session session, TableStatsProvider tableStatsProvider)
+        public Rewriter(PlanNodeIdAllocator idAllocator, SymbolAllocator symbolAllocator, Session session, TableStatsProvider tableStatsProvider, TableDependencyCollector tableDependencyCollector)
         {
             this.idAllocator = idAllocator;
             this.symbolAllocator = symbolAllocator;
             this.statsProvider = new CachingStatsProvider(statsCalculator, session, tableStatsProvider);
             this.session = session;
+            this.tableDependencyCollector = tableDependencyCollector;
             this.redistributeWrites = SystemSessionProperties.isRedistributeWrites(session);
         }
 
@@ -675,7 +678,8 @@ public class AddExchanges
                         session,
                         plannerContext,
                         statsProvider,
-                        symbolAllocator);
+                        symbolAllocator,
+                        tableDependencyCollector);
                 if (plan.isPresent()) {
                     return new PlanWithProperties(plan.get(), derivePropertiesRecursively(plan.get()));
                 }

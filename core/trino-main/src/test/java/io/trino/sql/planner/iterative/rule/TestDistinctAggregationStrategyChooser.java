@@ -31,6 +31,7 @@ import io.trino.spi.predicate.TupleDomain;
 import io.trino.sql.planner.PlanNodeIdAllocator;
 import io.trino.sql.planner.Symbol;
 import io.trino.sql.planner.SymbolAllocator;
+import io.trino.sql.planner.TableDependencyCollector;
 import io.trino.sql.planner.iterative.Lookup;
 import io.trino.sql.planner.iterative.Rule.Context;
 import io.trino.sql.planner.plan.AggregationNode;
@@ -443,6 +444,12 @@ public class TestDistinctAggregationStrategyChooser
             public WarningCollector getWarningCollector()
             {
                 throw new UnsupportedOperationException();
+            }
+
+            @Override
+            public TableDependencyCollector getTableDependencyCollector()
+            {
+                return new TableDependencyCollector();
             }
         };
     }

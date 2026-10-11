@@ -38,6 +38,7 @@ import io.trino.spi.connector.ConnectorMergeTableHandle;
 import io.trino.spi.connector.ConnectorOutputMetadata;
 import io.trino.spi.connector.ConnectorOutputTableHandle;
 import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.connector.ConnectorTableDependency;
 import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTableLayout;
 import io.trino.spi.connector.ConnectorTableMetadata;
@@ -1373,7 +1374,7 @@ public class DefaultJdbcMetadata
     public Optional<ConnectorOutputMetadata> finishMerge(
             ConnectorSession session,
             ConnectorMergeTableHandle tableHandle,
-            List<ConnectorTableHandle> sourceTableHandles,
+            List<ConnectorTableDependency> tableDependencies,
             Collection<Slice> fragments,
             Collection<ComputedStatistics> computedStatistics)
     {
