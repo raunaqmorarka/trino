@@ -20,13 +20,17 @@ import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
 import io.airlift.testing.TestingTicker;
+import io.airlift.units.DataSize;
 import io.airlift.units.Duration;
 import io.opentelemetry.api.trace.Span;
 import io.trino.execution.SplitRunner;
+import io.trino.execution.SplitRunner.BlockedReason;
 import io.trino.execution.StageId;
 import io.trino.execution.TaskId;
 import io.trino.execution.TaskManagerConfig;
 import io.trino.execution.executor.TaskHandle;
+import io.trino.execution.executor.TaskMemory;
+import io.trino.execution.executor.TestingTaskMemory;
 import io.trino.execution.executor.scheduler.FairScheduler;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -45,12 +49,18 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
+import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
 import static com.google.common.util.concurrent.Uninterruptibles.awaitUninterruptibly;
+import static io.airlift.concurrent.MoreFutures.getFutureValue;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.airlift.tracing.Tracing.noopTracer;
+import static io.airlift.units.DataSize.Unit.GIGABYTE;
+import static io.airlift.units.DataSize.Unit.MEGABYTE;
+import static io.trino.testing.assertions.Assert.assertEventually;
 import static io.trino.util.EmbedVersion.testingVersionEmbedder;
 import static java.util.concurrent.Executors.newSingleThreadExecutor;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
+import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -335,7 +345,8 @@ public class TestThreadPerDriverTaskExecutor
                 testingVersionEmbedder(),
                 noopTracer(),
                 1,
-                () -> 0);
+                () -> 0,
+                (_, _, _) -> () -> {});
         TestingSplitRunner failing = new CloseFailingSplitRunner();
         TestingSplitRunner pending = new TestingSplitRunner(ImmutableList.of(_ -> Futures.immediateVoidFuture()));
         ListenableFuture<Void> claimedDone = task.enqueueLeafSplit(failing);
@@ -496,6 +507,237 @@ public class TestThreadPerDriverTaskExecutor
         }
     }
 
+    @Test
+    @Timeout(30)
+    public void testLeafAdmissionSkipsParkedTask()
+    {
+        FairScheduler scheduler = FairScheduler.newInstance(4);
+        ThreadPerDriverTaskExecutor executor = new ThreadPerDriverTaskExecutor(noopTracer(), testingVersionEmbedder(), scheduler, 1, 4, 1);
+        // splits are scheduled only by enqueueSplits and by leaf splits that block on their source
+        scheduler.start();
+        try {
+            TaskHandle parkedTask = addLeafAdmissionTask(executor, "parked", new TestingTaskMemory(DataSize.of(1, MEGABYTE), DataSize.of(1, GIGABYTE), DataSize.of(1, GIGABYTE)));
+            AdmissionSplit parkedSplit = new AdmissionSplit(BlockedReason.OUTPUT, false);
+            AdmissionSplit parkedTaskQueuedSplit = new AdmissionSplit(BlockedReason.SOURCE, false);
+            executor.enqueueSplits(parkedTask, false, ImmutableList.of(parkedSplit));
+            assertEventually(new Duration(10, SECONDS), () -> assertThat(executor.getBlockedSplits()).isEqualTo(1));
+            executor.enqueueSplits(parkedTask, false, ImmutableList.of(parkedTaskQueuedSplit));
+
+            TaskHandle readingTask = addLeafAdmissionTask(executor, "reading", new TestingTaskMemory(DataSize.of(1, MEGABYTE), DataSize.of(1, GIGABYTE), DataSize.of(1, GIGABYTE)));
+            AdmissionSplit readingSplit = new AdmissionSplit(BlockedReason.SOURCE, false);
+            AdmissionSplit readingTaskQueuedSplit = new AdmissionSplit(BlockedReason.SOURCE, false);
+            executor.enqueueSplits(readingTask, false, ImmutableList.of(readingSplit, readingTaskQueuedSplit));
+
+            assertEventually(new Duration(10, SECONDS), () -> assertThat(executor.getBlockedSplits()).isEqualTo(3));
+            assertThat(readingTaskQueuedSplit.isStarted()).isTrue();
+            assertThat(parkedTaskQueuedSplit.isStarted()).isFalse();
+            assertThat(executor.getLeafSplitsAdmittedAboveFloor()).isEqualTo(1);
+            assertThat(executor.getInFlightLeafSplits()).isEqualTo(2);
+            executor.removeTask(parkedTask);
+            executor.removeTask(readingTask);
+            assertEventually(new Duration(10, SECONDS), () -> assertThat(executor.getBlockedSplits()).isEqualTo(0));
+            assertThat(executor.getInFlightLeafSplits()).isEqualTo(0);
+        }
+        finally {
+            executor.stop();
+        }
+    }
+
+    @Test
+    @Timeout(30)
+    public void testLeafAdmissionStartsBuildScanBehindParkedProbe()
+    {
+        FairScheduler scheduler = FairScheduler.newInstance(4);
+        ThreadPerDriverTaskExecutor executor = new ThreadPerDriverTaskExecutor(noopTracer(), testingVersionEmbedder(), scheduler, 1, 4, 1);
+        // splits are scheduled only by enqueueSplits and by leaf splits that block on their source
+        scheduler.start();
+        try {
+            TaskHandle probeTask = addLeafAdmissionTask(executor, "probe", new TestingTaskMemory(DataSize.of(1, MEGABYTE), DataSize.of(1, GIGABYTE), DataSize.of(1, GIGABYTE)));
+            AdmissionSplit probeSplit = new AdmissionSplit(BlockedReason.OPERATOR, false);
+            AdmissionSplit probeQueuedSplit = new AdmissionSplit(BlockedReason.OPERATOR, false);
+            executor.enqueueSplits(probeTask, false, ImmutableList.of(probeSplit));
+            assertEventually(new Duration(10, SECONDS), () -> assertThat(executor.getBlockedSplits()).isEqualTo(1));
+            executor.enqueueSplits(probeTask, false, ImmutableList.of(probeQueuedSplit));
+
+            TaskHandle buildTask = addLeafAdmissionTask(executor, "build", new TestingTaskMemory(DataSize.of(1, MEGABYTE), DataSize.of(1, GIGABYTE), DataSize.of(1, GIGABYTE)));
+            List<AdmissionSplit> buildSplits = ImmutableList.of(
+                    new AdmissionSplit(BlockedReason.SOURCE, true),
+                    new AdmissionSplit(BlockedReason.SOURCE, true),
+                    new AdmissionSplit(BlockedReason.SOURCE, true));
+            executor.enqueueSplits(buildTask, false, buildSplits);
+
+            assertEventually(new Duration(10, SECONDS), () -> assertThat(buildSplits).allMatch(AdmissionSplit::isStarted));
+            assertThat(probeQueuedSplit.isStarted()).isFalse();
+            assertThat(executor.getLeafSplitsAdmittedAboveFloor()).isEqualTo(2);
+            buildSplits.forEach(AdmissionSplit::release);
+            executor.removeTask(probeTask);
+            executor.removeTask(buildTask);
+        }
+        finally {
+            executor.stop();
+        }
+    }
+
+    @Test
+    @Timeout(30)
+    public void testLeafAdmissionWaitsForFreeSlot()
+    {
+        FairScheduler scheduler = FairScheduler.newInstance(2);
+        ThreadPerDriverTaskExecutor executor = new ThreadPerDriverTaskExecutor(noopTracer(), testingVersionEmbedder(), scheduler, 1, 4, 1);
+        // splits are scheduled only by enqueueSplits, by leaf splits that block on their source, and by explicit passes
+        scheduler.start();
+        try {
+            TaskHandle taskHandle = addLeafAdmissionTask(executor, "test", new TestingTaskMemory(DataSize.of(1, MEGABYTE), DataSize.of(1, GIGABYTE), DataSize.of(1, GIGABYTE)));
+            AdmissionSplit busySplit = new AdmissionSplit(BlockedReason.OUTPUT, true);
+            executor.enqueueSplits(taskHandle, true, ImmutableList.of(busySplit));
+            assertEventually(new Duration(10, SECONDS), () -> assertThat(busySplit.isStarted()).isTrue());
+
+            AdmissionSplit heldSplit = new AdmissionSplit(BlockedReason.SOURCE, true);
+            AdmissionSplit queuedSplit = new AdmissionSplit(BlockedReason.SOURCE, false);
+            executor.enqueueSplits(taskHandle, false, ImmutableList.of(heldSplit, queuedSplit));
+            assertEventually(new Duration(10, SECONDS), () -> assertThat(heldSplit.isStarted()).isTrue());
+
+            AdmissionSplit intermediateSplit = new AdmissionSplit(BlockedReason.OUTPUT, true);
+            executor.enqueueSplits(taskHandle, true, ImmutableList.of(intermediateSplit));
+            heldSplit.release();
+
+            assertEventually(new Duration(10, SECONDS), () -> assertThat(intermediateSplit.isStarted()).isTrue());
+            assertThat(executor.getLeafSplitsAdmittedAboveFloor()).isEqualTo(0);
+            assertThat(queuedSplit.isStarted()).isFalse();
+
+            intermediateSplit.release();
+            assertEventually(new Duration(10, SECONDS), () -> assertThat(executor.getBlockedSplits()).isEqualTo(2));
+            executor.scheduleMoreLeafSplits();
+            assertEventually(new Duration(10, SECONDS), () -> assertThat(queuedSplit.isStarted()).isTrue());
+            assertThat(executor.getLeafSplitsAdmittedAboveFloor()).isEqualTo(1);
+            busySplit.release();
+            executor.removeTask(taskHandle);
+        }
+        finally {
+            executor.stop();
+        }
+    }
+
+    @Test
+    @Timeout(30)
+    public void testLeafAdmissionRefusedWithoutEstimate()
+    {
+        FairScheduler scheduler = FairScheduler.newInstance(4);
+        ThreadPerDriverTaskExecutor executor = new ThreadPerDriverTaskExecutor(noopTracer(), testingVersionEmbedder(), scheduler, 1, 4, 1);
+        // splits are scheduled only by enqueueSplits and by leaf splits that block on their source
+        scheduler.start();
+        try {
+            TaskHandle taskHandle = addLeafAdmissionTask(executor, "test", new TestingTaskMemory(DataSize.ofBytes(0), DataSize.of(1, GIGABYTE), DataSize.of(1, GIGABYTE)));
+            AdmissionSplit queuedSplit = assertLeafAdmissionRefused(executor, taskHandle);
+            assertThat(queuedSplit.isStarted()).isFalse();
+        }
+        finally {
+            executor.stop();
+        }
+    }
+
+    @Test
+    @Timeout(30)
+    public void testLeafAdmissionRefusedNearQueryMemoryLimit()
+    {
+        FairScheduler scheduler = FairScheduler.newInstance(4);
+        ThreadPerDriverTaskExecutor executor = new ThreadPerDriverTaskExecutor(noopTracer(), testingVersionEmbedder(), scheduler, 1, 4, 1);
+        // splits are scheduled only by enqueueSplits and by leaf splits that block on their source
+        scheduler.start();
+        try {
+            TaskHandle taskHandle = addLeafAdmissionTask(executor, "test", new TestingTaskMemory(DataSize.of(1, MEGABYTE), DataSize.of(20, MEGABYTE), DataSize.of(100, MEGABYTE)));
+            AdmissionSplit queuedSplit = assertLeafAdmissionRefused(executor, taskHandle);
+            assertThat(queuedSplit.isStarted()).isFalse();
+        }
+        finally {
+            executor.stop();
+        }
+    }
+
+    @Test
+    @Timeout(30)
+    public void testLeafAdmissionRefusedAtInFlightCap()
+    {
+        FairScheduler scheduler = FairScheduler.newInstance(1);
+        ThreadPerDriverTaskExecutor executor = new ThreadPerDriverTaskExecutor(noopTracer(), testingVersionEmbedder(), scheduler, 1, 4, 1);
+        // splits are scheduled only by enqueueSplits and by leaf splits that block on their source
+        scheduler.start();
+        try {
+            TaskHandle taskHandle = addLeafAdmissionTask(executor, "test", new TestingTaskMemory(DataSize.of(1, MEGABYTE), DataSize.of(1, GIGABYTE), DataSize.of(1, GIGABYTE)));
+            AdmissionSplit blockedSplit = new AdmissionSplit(BlockedReason.SOURCE, false);
+            AdmissionSplit queuedSplit = new AdmissionSplit(BlockedReason.SOURCE, false);
+            executor.enqueueSplits(taskHandle, false, ImmutableList.of(blockedSplit));
+            assertEventually(new Duration(10, SECONDS), () -> assertThat(executor.getInFlightLeafSplits()).isEqualTo(1));
+            executor.enqueueSplits(taskHandle, false, ImmutableList.of(queuedSplit));
+
+            TaskHandle otherTask = addLeafAdmissionTask(executor, "other", new TestingTaskMemory(DataSize.of(1, MEGABYTE), DataSize.of(1, GIGABYTE), DataSize.of(1, GIGABYTE)));
+            AdmissionSplit otherSplit = new AdmissionSplit(BlockedReason.OUTPUT, false);
+            executor.enqueueSplits(otherTask, false, ImmutableList.of(otherSplit));
+            assertEventually(new Duration(10, SECONDS), () -> assertThat(otherSplit.isStarted()).isTrue());
+
+            assertThat(executor.getLeafSplitsAdmittedAboveFloor()).isEqualTo(0);
+            assertThat(queuedSplit.isStarted()).isFalse();
+            executor.removeTask(taskHandle);
+            executor.removeTask(otherTask);
+        }
+        finally {
+            executor.stop();
+        }
+    }
+
+    @Test
+    @Timeout(30)
+    public void testLeafAdmissionSamplesRunningSplits()
+    {
+        FairScheduler scheduler = FairScheduler.newInstance(4);
+        ThreadPerDriverTaskExecutor executor = new ThreadPerDriverTaskExecutor(noopTracer(), testingVersionEmbedder(), scheduler, 1, 4, 1);
+        // splits are scheduled only by enqueueSplits and by leaf splits that block on their source
+        scheduler.start();
+        try {
+            TaskHandle taskHandle = addLeafAdmissionTask(executor, "test", new TestingTaskMemory(DataSize.of(1, MEGABYTE), DataSize.of(1, GIGABYTE), DataSize.of(1, GIGABYTE)));
+            AdmissionSplit heldSplit = new AdmissionSplit(BlockedReason.SOURCE, true);
+            executor.enqueueSplits(taskHandle, false, ImmutableList.of(heldSplit));
+            assertEventually(new Duration(10, SECONDS), () -> assertThat(heldSplit.isStarted()).isTrue());
+
+            AdmissionSplit queuedSplit = new AdmissionSplit(BlockedReason.SOURCE, false);
+            executor.enqueueSplits(taskHandle, false, ImmutableList.of(queuedSplit));
+
+            assertEventually(new Duration(10, SECONDS), () -> assertThat(queuedSplit.isStarted()).isTrue());
+            assertThat(executor.getLeafSplitsAdmittedAboveFloor()).isEqualTo(1);
+            heldSplit.release();
+            executor.removeTask(taskHandle);
+        }
+        finally {
+            executor.stop();
+        }
+    }
+
+    // Blocks a split of the task on its source and returns its queued split once another query's split is admitted.
+    private static AdmissionSplit assertLeafAdmissionRefused(ThreadPerDriverTaskExecutor executor, TaskHandle taskHandle)
+    {
+        AdmissionSplit blockedSplit = new AdmissionSplit(BlockedReason.SOURCE, false);
+        AdmissionSplit queuedSplit = new AdmissionSplit(BlockedReason.SOURCE, false);
+        executor.enqueueSplits(taskHandle, false, ImmutableList.of(blockedSplit, queuedSplit));
+        assertEventually(new Duration(10, SECONDS), () -> assertThat(executor.getBlockedSplits()).isEqualTo(1));
+
+        TaskHandle otherTask = addLeafAdmissionTask(executor, "other", new TestingTaskMemory(DataSize.of(1, MEGABYTE), DataSize.of(1, GIGABYTE), DataSize.of(1, GIGABYTE)));
+        AdmissionSplit otherQueuedSplit = new AdmissionSplit(BlockedReason.SOURCE, false);
+        executor.enqueueSplits(otherTask, false, ImmutableList.of(new AdmissionSplit(BlockedReason.SOURCE, false), otherQueuedSplit));
+        assertEventually(new Duration(10, SECONDS), () -> assertThat(otherQueuedSplit.isStarted()).isTrue());
+
+        assertThat(executor.getLeafSplitsAdmittedAboveFloor()).isEqualTo(1);
+        executor.removeTask(taskHandle);
+        executor.removeTask(otherTask);
+        return queuedSplit;
+    }
+
+    private static TaskHandle addLeafAdmissionTask(ThreadPerDriverTaskExecutor executor, String queryId, TaskMemory taskMemory)
+    {
+        TaskHandle taskHandle = executor.addTask(new TaskId(new StageId(queryId, 0), 0, 0), () -> 0, 4, new Duration(1, MILLISECONDS), OptionalInt.empty());
+        taskHandle.setTaskMemory(taskMemory);
+        return taskHandle;
+    }
+
     private static class TestFuture
             extends AbstractFuture<Void>
     {
@@ -606,6 +848,82 @@ public class TestThreadPerDriverTaskExecutor
         {
             super.close();
             throw new RuntimeException("close failed");
+        }
+    }
+
+    private static class AdmissionSplit
+            implements SplitRunner
+    {
+        private final BlockedReason blockedReason;
+        private final SettableFuture<Void> released = SettableFuture.create();
+        private final SettableFuture<Void> blocked = SettableFuture.create();
+        private volatile boolean started;
+        private volatile boolean finished;
+
+        private AdmissionSplit(BlockedReason blockedReason, boolean held)
+        {
+            this.blockedReason = blockedReason;
+            if (!held) {
+                released.set(null);
+            }
+        }
+
+        @Override
+        public int getPipelineId()
+        {
+            return 0;
+        }
+
+        @Override
+        public Span getPipelineSpan()
+        {
+            return Span.getInvalid();
+        }
+
+        @Override
+        public boolean isFinished()
+        {
+            return finished;
+        }
+
+        @Override
+        public ListenableFuture<Void> processFor(Duration duration)
+        {
+            started = true;
+            if (blocked.isDone()) {
+                finished = true;
+                return immediateVoidFuture();
+            }
+            getFutureValue(released);
+            return blocked;
+        }
+
+        @Override
+        public BlockedReason getBlockedReason()
+        {
+            return blockedReason;
+        }
+
+        @Override
+        public String getInfo()
+        {
+            return "admission split";
+        }
+
+        @Override
+        public void close()
+        {
+            finished = true;
+        }
+
+        public boolean isStarted()
+        {
+            return started;
+        }
+
+        public void release()
+        {
+            released.set(null);
         }
     }
 }
