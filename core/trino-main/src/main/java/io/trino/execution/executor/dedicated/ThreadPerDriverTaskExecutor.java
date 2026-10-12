@@ -26,11 +26,15 @@ import io.airlift.log.Logger;
 import io.airlift.units.Duration;
 import io.opentelemetry.api.trace.Tracer;
 import io.trino.execution.SplitRunner;
+import io.trino.execution.SplitRunner.BlockedReason;
 import io.trino.execution.TaskId;
 import io.trino.execution.TaskManagerConfig;
+import io.trino.execution.executor.LeafSplitAdmissionBudget;
+import io.trino.execution.executor.LeafSplitMemoryEstimate;
 import io.trino.execution.executor.RunningSplitInfo;
 import io.trino.execution.executor.TaskExecutor;
 import io.trino.execution.executor.TaskHandle;
+import io.trino.execution.executor.TaskMemory;
 import io.trino.execution.executor.dedicated.TaskEntry.QueuedSplit;
 import io.trino.execution.executor.scheduler.FairScheduler;
 import io.trino.spi.VersionEmbedder;
@@ -49,6 +53,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.DoubleSupplier;
@@ -86,8 +91,15 @@ public class ThreadPerDriverTaskExecutor
     private final AtomicBoolean schedulingLeafSplits = new AtomicBoolean();
     private final AtomicBoolean rescheduleLeafSplits = new AtomicBoolean();
 
+    private final AtomicInteger blockedSplits = new AtomicInteger();
+    // Leaf splits blocked on their source or on memory.
+    private final AtomicInteger inFlightLeafSplits = new AtomicInteger();
+
+    private final AtomicLong leafSplitsAdmittedAboveFloor = new AtomicLong();
+
     // Do not inline this field to avoid creating lambdas that cannot be cached by JVM.
     private final Consumer<TaskEntry> leafSplitDoneCallback = this::leafSplitDone;
+    private final SplitBlockedListener splitBlockedListener = this::splitBlocked;
     private final FailureLogger schedulingFailureLogger = new FailureLogger("Error scheduling leaf splits");
     private final Runnable scheduleMoreLeafSplitsQuietly = maintenance(this::scheduleMoreLeafSplits, schedulingFailureLogger);
 
@@ -170,7 +182,8 @@ public class ThreadPerDriverTaskExecutor
                 versionEmbedder,
                 tracer,
                 initialSplitConcurrency,
-                utilizationSupplier);
+                utilizationSupplier,
+                splitBlockedListener);
         tasks.put(taskId, task);
         return task;
     }
@@ -243,6 +256,47 @@ public class ThreadPerDriverTaskExecutor
             return null;
         }
         return claimed.getFirst();
+    }
+
+    private Runnable splitBlocked(TaskEntry task, boolean leaf, BlockedReason reason)
+    {
+        if (!leaf) {
+            blockedSplits.incrementAndGet();
+            return runOnce(blockedSplits::decrementAndGet);
+        }
+
+        boolean inFlight = reason.isInFlight();
+        if (inFlight) {
+            inFlightLeafSplits.incrementAndGet();
+        }
+        else {
+            task.leafSplitParked();
+        }
+        blockedSplits.incrementAndGet();
+        // a leaf split waiting on its source frees its scheduler slot for another split
+        if (reason == BlockedReason.SOURCE) {
+            scheduleMoreLeafSplitsQuietly.run();
+        }
+
+        return runOnce(() -> {
+            blockedSplits.decrementAndGet();
+            if (inFlight) {
+                inFlightLeafSplits.decrementAndGet();
+            }
+            else {
+                task.leafSplitUnparked();
+            }
+        });
+    }
+
+    private static Runnable runOnce(Runnable action)
+    {
+        AtomicBoolean done = new AtomicBoolean();
+        return () -> {
+            if (done.compareAndSet(false, true)) {
+                action.run();
+            }
+        };
     }
 
     @VisibleForTesting
@@ -341,7 +395,65 @@ public class ThreadPerDriverTaskExecutor
             }
         }
 
+        // the loop above stops below the target only when no task can take another split
+        if (runningLeafDrivers >= targetGlobalLeafDrivers) {
+            claimAboveFloor(claimed);
+        }
+
         return claimed;
+    }
+
+    // Claims leaf splits above the target global leaf drivers while scheduler slots lack runnable splits and memory allows.
+    @GuardedBy("this")
+    private void claimAboveFloor(List<ClaimedLeafSplit> claimed)
+    {
+        int runnableSplits = max(0, getTotalRunningSplits() - blockedSplits.get());
+        if (isWorkFull(runnableSplits)) {
+            return;
+        }
+
+        LeafSplitAdmissionBudget budget = new LeafSplitAdmissionBudget();
+        boolean progress = true;
+        while (progress) {
+            progress = false;
+            for (TaskEntry task : tasks.values()) {
+                if (task.runningLeafSplits() >= min(task.targetConcurrency(), maxDriversPerTask)) {
+                    continue;
+                }
+                if (task.isParked() || !task.hasPendingLeafSplits()) {
+                    continue;
+                }
+                LeafSplitMemoryEstimate leafMemoryEstimate = task.getLeafMemoryEstimate();
+                TaskMemory taskMemory = leafMemoryEstimate.getTaskMemory();
+                // leaf driver memory is sampled where admission reads the estimate
+                long estimate = leafMemoryEstimate.sample(System.nanoTime());
+                if (taskMemory == null || estimate == 0) {
+                    continue;
+                }
+                if (!budget.fits(task.taskId(), taskMemory, estimate, task.runningLeafSplits())) {
+                    continue;
+                }
+                if (claimLeafSplit(task, claimed)) {
+                    budget.reserve(task.taskId(), estimate);
+                    leafSplitsAdmittedAboveFloor.incrementAndGet();
+                    runnableSplits++;
+                    progress = true;
+                    if (isWorkFull(runnableSplits)) {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    // Scheduler slots have a runnable split each, or enough leaf splits wait on their source or on memory.
+    private boolean isWorkFull(int runnableSplits)
+    {
+        int totalSlots = scheduler.getConcurrencyControlTotalSlots();
+        if (inFlightLeafSplits.get() >= totalSlots) {
+            return true;
+        }
+        return runnableSplits >= totalSlots;
     }
 
     @GuardedBy("this")
@@ -429,8 +541,15 @@ public class ThreadPerDriverTaskExecutor
 
     private void adjustConcurrency()
     {
+        boolean increased = false;
         for (TaskEntry task : tasks.values()) {
-            task.updateConcurrency();
+            if (task.updateConcurrency()) {
+                increased = true;
+            }
+        }
+        // a higher target concurrency lets a task start another pending leaf split now
+        if (increased) {
+            scheduleMoreLeafSplitsQuietly.run();
         }
     }
 
@@ -490,6 +609,24 @@ public class ThreadPerDriverTaskExecutor
         return tasks.values().stream()
                 .mapToInt(TaskEntry::pendingLeafSplitCount)
                 .sum();
+    }
+
+    @Managed
+    public int getBlockedSplits()
+    {
+        return blockedSplits.get();
+    }
+
+    @Managed
+    public int getInFlightLeafSplits()
+    {
+        return inFlightLeafSplits.get();
+    }
+
+    @Managed
+    public long getLeafSplitsAdmittedAboveFloor()
+    {
+        return leafSplitsAdmittedAboveFloor.get();
     }
 
     @Managed(description = "Scheduler executor")
