@@ -541,15 +541,8 @@ public class ThreadPerDriverTaskExecutor
 
     private void adjustConcurrency()
     {
-        boolean increased = false;
         for (TaskEntry task : tasks.values()) {
-            if (task.updateConcurrency()) {
-                increased = true;
-            }
-        }
-        // a higher target concurrency lets a task start another pending leaf split now
-        if (increased) {
-            scheduleMoreLeafSplitsQuietly.run();
+            task.updateConcurrency();
         }
     }
 
