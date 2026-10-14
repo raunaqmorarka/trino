@@ -245,14 +245,18 @@ public class ThreadPerDriverTaskExecutor
             return null;
         }
 
+        List<ClaimedLeafSplit> claimed = new ArrayList<>(1);
         int taskRunning = task.runningLeafSplits();
-        if (taskRunning >= minDriversPerTask &&
-                (runningLeafDrivers >= targetGlobalLeafDrivers || taskRunning >= min(task.targetConcurrency(), maxDriversPerTask))) {
+        if (runningLeafDrivers >= targetGlobalLeafDrivers && taskRunning >= minDriversPerTask) {
+            // a split admitted above the target global leaf drivers is replaced under the same admission checks
+            if (isWorkFull(runnableSplits()) || !claimAboveFloor(task, new LeafSplitAdmissionBudget(), claimed)) {
+                return null;
+            }
+        }
+        else if (taskRunning >= minDriversPerTask && taskRunning >= min(task.targetConcurrency(), maxDriversPerTask)) {
             return null;
         }
-
-        List<ClaimedLeafSplit> claimed = new ArrayList<>(1);
-        if (!claimLeafSplit(task, claimed)) {
+        else if (!claimLeafSplit(task, claimed)) {
             return null;
         }
         return claimed.getFirst();
@@ -407,7 +411,7 @@ public class ThreadPerDriverTaskExecutor
     @GuardedBy("this")
     private void claimAboveFloor(List<ClaimedLeafSplit> claimed)
     {
-        int runnableSplits = max(0, getTotalRunningSplits() - blockedSplits.get());
+        int runnableSplits = runnableSplits();
         if (isWorkFull(runnableSplits)) {
             return;
         }
@@ -417,25 +421,7 @@ public class ThreadPerDriverTaskExecutor
         while (progress) {
             progress = false;
             for (TaskEntry task : tasks.values()) {
-                if (task.runningLeafSplits() >= min(task.targetConcurrency(), maxDriversPerTask)) {
-                    continue;
-                }
-                if (task.isParked() || !task.hasPendingLeafSplits()) {
-                    continue;
-                }
-                LeafSplitMemoryEstimate leafMemoryEstimate = task.getLeafMemoryEstimate();
-                TaskMemory taskMemory = leafMemoryEstimate.getTaskMemory();
-                // leaf driver memory is sampled where admission reads the estimate
-                long estimate = leafMemoryEstimate.sample(System.nanoTime());
-                if (taskMemory == null || estimate == 0) {
-                    continue;
-                }
-                if (!budget.fits(task.taskId(), taskMemory, estimate, task.runningLeafSplits())) {
-                    continue;
-                }
-                if (claimLeafSplit(task, claimed)) {
-                    budget.reserve(task.taskId(), estimate);
-                    leafSplitsAdmittedAboveFloor.incrementAndGet();
+                if (claimAboveFloor(task, budget, claimed)) {
                     runnableSplits++;
                     progress = true;
                     if (isWorkFull(runnableSplits)) {
@@ -444,6 +430,39 @@ public class ThreadPerDriverTaskExecutor
                 }
             }
         }
+    }
+
+    // Claims one leaf split of the task above the target global leaf drivers when the task is below its cap, not parked, and memory allows.
+    @GuardedBy("this")
+    private boolean claimAboveFloor(TaskEntry task, LeafSplitAdmissionBudget budget, List<ClaimedLeafSplit> claimed)
+    {
+        if (task.runningLeafSplits() >= min(task.targetConcurrency(), maxDriversPerTask)) {
+            return false;
+        }
+        if (task.isParked() || !task.hasPendingLeafSplits()) {
+            return false;
+        }
+        LeafSplitMemoryEstimate leafMemoryEstimate = task.getLeafMemoryEstimate();
+        TaskMemory taskMemory = leafMemoryEstimate.getTaskMemory();
+        // leaf driver memory is sampled where admission reads the estimate
+        long estimate = leafMemoryEstimate.sample(System.nanoTime());
+        if (taskMemory == null || estimate == 0) {
+            return false;
+        }
+        if (!budget.fits(task.taskId(), taskMemory, estimate, task.runningLeafSplits())) {
+            return false;
+        }
+        if (!claimLeafSplit(task, claimed)) {
+            return false;
+        }
+        budget.reserve(task.taskId(), estimate);
+        leafSplitsAdmittedAboveFloor.incrementAndGet();
+        return true;
+    }
+
+    private int runnableSplits()
+    {
+        return max(0, getTotalRunningSplits() - blockedSplits.get());
     }
 
     // Scheduler slots have a runnable split each, or enough leaf splits wait on their source or on memory.

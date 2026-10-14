@@ -712,6 +712,36 @@ public class TestThreadPerDriverTaskExecutor
         }
     }
 
+    @Test
+    @Timeout(30)
+    public void testLeafAdmissionReplacesFinishedSplitAboveFloor()
+    {
+        FairScheduler scheduler = FairScheduler.newInstance(4);
+        ThreadPerDriverTaskExecutor executor = new ThreadPerDriverTaskExecutor(noopTracer(), testingVersionEmbedder(), scheduler, 1, 2, 1);
+        // splits are scheduled only by enqueueSplits and by leaf split completion
+        scheduler.start();
+        try {
+            TaskHandle taskHandle = addLeafAdmissionTask(executor, "test", new TestingTaskMemory(DataSize.of(1, MEGABYTE), DataSize.of(1, GIGABYTE), DataSize.of(1, GIGABYTE)));
+            AdmissionSplit floorSplit = new AdmissionSplit(BlockedReason.OUTPUT, true);
+            AdmissionSplit aboveFloorSplit = new AdmissionSplit(BlockedReason.OUTPUT, true);
+            AdmissionSplit queuedSplit = new AdmissionSplit(BlockedReason.OUTPUT, true);
+            executor.enqueueSplits(taskHandle, false, ImmutableList.of(floorSplit, aboveFloorSplit, queuedSplit));
+            assertEventually(new Duration(10, SECONDS), () -> assertThat(aboveFloorSplit.isStarted()).isTrue());
+            assertThat(executor.getLeafSplitsAdmittedAboveFloor()).isEqualTo(1);
+            assertThat(queuedSplit.isStarted()).isFalse();
+
+            aboveFloorSplit.finish();
+            assertEventually(new Duration(10, SECONDS), () -> assertThat(queuedSplit.isStarted()).isTrue());
+            assertThat(executor.getLeafSplitsAdmittedAboveFloor()).isEqualTo(2);
+            floorSplit.release();
+            queuedSplit.release();
+            executor.removeTask(taskHandle);
+        }
+        finally {
+            executor.stop();
+        }
+    }
+
     // Blocks a split of the task on its source and returns its queued split once another query's split is admitted.
     private static AdmissionSplit assertLeafAdmissionRefused(ThreadPerDriverTaskExecutor executor, TaskHandle taskHandle)
     {
@@ -923,6 +953,12 @@ public class TestThreadPerDriverTaskExecutor
 
         public void release()
         {
+            released.set(null);
+        }
+
+        public void finish()
+        {
+            blocked.set(null);
             released.set(null);
         }
     }
