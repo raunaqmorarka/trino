@@ -74,6 +74,7 @@ final class S3FileSystemLoader
     private final S3FileSystemConfig config;
     private final S3Context context;
     private final ExecutorService uploadExecutor = newCachedThreadPool(daemonThreadsNamed("s3-upload-%s"));
+    private final ExecutorService dnsRefreshExecutor = newCachedThreadPool(daemonThreadsNamed("s3-dns-refresh-%s"));
     private final Map<Optional<S3SecurityMappingResult>, S3Client> clients = new ConcurrentHashMap<>();
     private final Map<Optional<S3SecurityMappingResult>, S3Presigner> preSigners = new ConcurrentHashMap<>();
 
@@ -91,7 +92,7 @@ final class S3FileSystemLoader
     private S3FileSystemLoader(Optional<S3SecurityMappingProvider> mappingProvider, OpenTelemetry openTelemetry, S3FileSystemConfig config, S3FileSystemStats stats)
     {
         this.mappingProvider = requireNonNull(mappingProvider, "mappingProvider is null");
-        this.httpClient = createHttpClient(config);
+        this.httpClient = createHttpClient(config, dnsRefreshExecutor);
 
         requireNonNull(stats, "stats is null");
 
@@ -139,6 +140,7 @@ final class S3FileSystemLoader
     {
         try (httpClient) {
             uploadExecutor.shutdownNow();
+            dnsRefreshExecutor.shutdownNow();
         }
     }
 
@@ -276,12 +278,13 @@ final class S3FileSystemLoader
         builder.putSignerProperty((SignerProperty<T>) property, (T) value);
     }
 
-    private static SdkHttpClient createHttpClient(S3FileSystemConfig config)
+    private static SdkHttpClient createHttpClient(S3FileSystemConfig config, Executor dnsRefreshExecutor)
     {
         Apache5HttpClient.Builder client = Apache5HttpClient.builder()
                 .maxConnections(config.getMaxConnections())
                 .tcpKeepAlive(config.getTcpKeepAlive())
-                .expectContinueEnabled(config.isExpectContinueEnabled());
+                .expectContinueEnabled(config.isExpectContinueEnabled())
+                .dnsResolver(new CachingDnsResolver(dnsRefreshExecutor));
 
         config.getConnectionTtl().ifPresent(ttl -> client.connectionTimeToLive(ttl.toJavaTime()));
         config.getConnectionMaxIdleTime().ifPresent(time -> client.connectionMaxIdleTime(time.toJavaTime()));
