@@ -93,7 +93,6 @@ public class TestThreadPerDriverTaskExecutor
         ThreadPerDriverTaskExecutor executor = new ThreadPerDriverTaskExecutor(noopTracer(), testingVersionEmbedder(), scheduler, 1, 1, Integer.MAX_VALUE);
         // Do not start the executor's periodic scheduler: the replacement below must be started by
         // the completion callback whose progress this test verifies.
-        scheduler.start();
         ExecutorService submitter = newSingleThreadExecutor(daemonThreadsNamed("submitter"));
         try {
             TaskHandle task = executor.addTask(new TaskId(new StageId("query", 1), 1, 1), () -> 0, 10, new Duration(1, MILLISECONDS), OptionalInt.empty());
@@ -169,7 +168,6 @@ public class TestThreadPerDriverTaskExecutor
         ThreadPerDriverTaskExecutor executor = new ThreadPerDriverTaskExecutor(noopTracer(), testingVersionEmbedder(), scheduler, 0, Integer.MAX_VALUE, 1);
         // start the scheduler but not the executor's background tasks, so that splits are only
         // scheduled by the explicit enqueueSplits calls below
-        scheduler.start();
         try {
             TaskId taskId = new TaskId(new StageId("query", 1), 1, 1);
             TaskEntry task = (TaskEntry) executor.addTask(taskId, () -> 0, 10, new Duration(1, MILLISECONDS), OptionalInt.empty());
@@ -211,7 +209,6 @@ public class TestThreadPerDriverTaskExecutor
 
         FairScheduler scheduler = new FairScheduler(2, threadFactory, Ticker.systemTicker());
         ThreadPerDriverTaskExecutor executor = new ThreadPerDriverTaskExecutor(noopTracer(), testingVersionEmbedder(), scheduler, 1, Integer.MAX_VALUE, 2);
-        scheduler.start();
         try {
             TaskEntry firstTask = (TaskEntry) executor.addTask(new TaskId(new StageId("query", 1), 1, 1), () -> 0, 10, new Duration(1, MILLISECONDS), OptionalInt.empty());
             TaskEntry secondTask = (TaskEntry) executor.addTask(new TaskId(new StageId("query", 1), 2, 1), () -> 0, 10, new Duration(1, MILLISECONDS), OptionalInt.empty());
@@ -651,7 +648,6 @@ public class TestThreadPerDriverTaskExecutor
         FairScheduler scheduler = FairScheduler.newInstance(4);
         ThreadPerDriverTaskExecutor executor = new ThreadPerDriverTaskExecutor(noopTracer(), testingVersionEmbedder(), scheduler, 1, 4, 1);
         // splits are scheduled only by enqueueSplits and by leaf splits that block on their source
-        scheduler.start();
         try {
             TaskHandle parkedTask = addLeafAdmissionTask(executor, "parked", new TestingTaskMemory(DataSize.of(1, MEGABYTE), DataSize.of(1, GIGABYTE), DataSize.of(1, GIGABYTE)));
             AdmissionSplit parkedSplit = new AdmissionSplit(BlockedReason.OUTPUT, false);
@@ -687,7 +683,6 @@ public class TestThreadPerDriverTaskExecutor
         FairScheduler scheduler = FairScheduler.newInstance(4);
         ThreadPerDriverTaskExecutor executor = new ThreadPerDriverTaskExecutor(noopTracer(), testingVersionEmbedder(), scheduler, 1, 4, 1);
         // splits are scheduled only by enqueueSplits and by leaf splits that block on their source
-        scheduler.start();
         try {
             TaskHandle probeTask = addLeafAdmissionTask(executor, "probe", new TestingTaskMemory(DataSize.of(1, MEGABYTE), DataSize.of(1, GIGABYTE), DataSize.of(1, GIGABYTE)));
             AdmissionSplit probeSplit = new AdmissionSplit(BlockedReason.OPERATOR, false);
@@ -722,7 +717,6 @@ public class TestThreadPerDriverTaskExecutor
         FairScheduler scheduler = FairScheduler.newInstance(2);
         ThreadPerDriverTaskExecutor executor = new ThreadPerDriverTaskExecutor(noopTracer(), testingVersionEmbedder(), scheduler, 1, 4, 1);
         // splits are scheduled only by enqueueSplits, by leaf splits that block on their source, and by explicit passes
-        scheduler.start();
         try {
             TaskHandle taskHandle = addLeafAdmissionTask(executor, "test", new TestingTaskMemory(DataSize.of(1, MEGABYTE), DataSize.of(1, GIGABYTE), DataSize.of(1, GIGABYTE)));
             AdmissionSplit busySplit = new AdmissionSplit(BlockedReason.OUTPUT, true);
@@ -762,7 +756,6 @@ public class TestThreadPerDriverTaskExecutor
         FairScheduler scheduler = FairScheduler.newInstance(4);
         ThreadPerDriverTaskExecutor executor = new ThreadPerDriverTaskExecutor(noopTracer(), testingVersionEmbedder(), scheduler, 1, 4, 1);
         // splits are scheduled only by enqueueSplits and by leaf splits that block on their source
-        scheduler.start();
         try {
             TaskHandle taskHandle = addLeafAdmissionTask(executor, "test", new TestingTaskMemory(DataSize.ofBytes(0), DataSize.of(1, GIGABYTE), DataSize.of(1, GIGABYTE)));
             AdmissionSplit queuedSplit = assertLeafAdmissionRefused(executor, taskHandle);
@@ -780,7 +773,6 @@ public class TestThreadPerDriverTaskExecutor
         FairScheduler scheduler = FairScheduler.newInstance(4);
         ThreadPerDriverTaskExecutor executor = new ThreadPerDriverTaskExecutor(noopTracer(), testingVersionEmbedder(), scheduler, 1, 4, 1);
         // splits are scheduled only by enqueueSplits and by leaf splits that block on their source
-        scheduler.start();
         try {
             TaskHandle taskHandle = addLeafAdmissionTask(executor, "test", new TestingTaskMemory(DataSize.of(1, MEGABYTE), DataSize.of(20, MEGABYTE), DataSize.of(100, MEGABYTE)));
             AdmissionSplit queuedSplit = assertLeafAdmissionRefused(executor, taskHandle);
@@ -798,7 +790,6 @@ public class TestThreadPerDriverTaskExecutor
         FairScheduler scheduler = FairScheduler.newInstance(1);
         ThreadPerDriverTaskExecutor executor = new ThreadPerDriverTaskExecutor(noopTracer(), testingVersionEmbedder(), scheduler, 1, 4, 1);
         // splits are scheduled only by enqueueSplits and by leaf splits that block on their source
-        scheduler.start();
         try {
             TaskHandle taskHandle = addLeafAdmissionTask(executor, "test", new TestingTaskMemory(DataSize.of(1, MEGABYTE), DataSize.of(1, GIGABYTE), DataSize.of(1, GIGABYTE)));
             AdmissionSplit blockedSplit = new AdmissionSplit(BlockedReason.SOURCE, false);
@@ -829,7 +820,6 @@ public class TestThreadPerDriverTaskExecutor
         FairScheduler scheduler = FairScheduler.newInstance(4);
         ThreadPerDriverTaskExecutor executor = new ThreadPerDriverTaskExecutor(noopTracer(), testingVersionEmbedder(), scheduler, 1, 4, 1);
         // splits are scheduled only by enqueueSplits and by leaf splits that block on their source
-        scheduler.start();
         try {
             TaskHandle taskHandle = addLeafAdmissionTask(executor, "test", new TestingTaskMemory(DataSize.of(1, MEGABYTE), DataSize.of(1, GIGABYTE), DataSize.of(1, GIGABYTE)));
             AdmissionSplit heldSplit = new AdmissionSplit(BlockedReason.SOURCE, true);
@@ -857,7 +847,6 @@ public class TestThreadPerDriverTaskExecutor
         FairScheduler scheduler = FairScheduler.newInstance(4);
         ThreadPerDriverTaskExecutor executor = new ThreadPerDriverTaskExecutor(noopTracer(), testingVersionEmbedder(), scheduler, 1, 4, 4);
         // no periodic passes run, so only the target concurrency rise can start the queued split
-        scheduler.start();
         CountDownLatch busySplitReleased = new CountDownLatch(1);
         try {
             TaskEntry task = (TaskEntry) executor.addTask(new TaskId(new StageId("query", 0), 0, 0), () -> 0, 1, new Duration(1, MILLISECONDS), OptionalInt.empty());

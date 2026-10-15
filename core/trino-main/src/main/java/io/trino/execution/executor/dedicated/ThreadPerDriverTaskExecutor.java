@@ -135,7 +135,6 @@ public class ThreadPerDriverTaskExecutor
     @Override
     public synchronized void start()
     {
-        scheduler.start();
         backgroundTasks.scheduleWithFixedDelay(scheduleMoreLeafSplitsQuietly, 0, 100, TimeUnit.MILLISECONDS);
         backgroundTasks.scheduleWithFixedDelay(maintenance(this::logDiagnostics, "Error logging diagnostics"), 0, 30, TimeUnit.SECONDS);
     }
@@ -638,13 +637,6 @@ public class ThreadPerDriverTaskExecutor
     public long getLeafSplitsAdmittedAboveFloor()
     {
         return leafSplitsAdmittedAboveFloor.get();
-    }
-
-    @Managed(description = "Scheduler executor")
-    @Nested
-    public ThreadPoolExecutorMBean getSchedulerExecutor()
-    {
-        return scheduler.getSchedulerExecutor();
     }
 
     @Managed(description = "Task executor")
