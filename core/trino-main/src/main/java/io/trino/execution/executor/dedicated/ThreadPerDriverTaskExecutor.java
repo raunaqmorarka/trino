@@ -38,7 +38,6 @@ import io.trino.execution.executor.TaskMemory;
 import io.trino.execution.executor.dedicated.TaskEntry.QueuedSplit;
 import io.trino.execution.executor.scheduler.FairScheduler;
 import io.trino.spi.VersionEmbedder;
-import jakarta.annotation.Nullable;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import org.weakref.jmx.Managed;
@@ -226,14 +225,14 @@ public class ThreadPerDriverTaskExecutor
 
     private void leafSplitDone(TaskEntry task)
     {
-        ClaimedLeafSplit replacement;
+        List<ClaimedLeafSplit> claimed;
         synchronized (this) {
             runningLeafDrivers--;
-            replacement = claimReplacementLeafSplit(task);
+            claimed = claimReplacementLeafSplits(task);
         }
 
-        if (replacement != null) {
-            startClaimedSplits(ImmutableList.of(replacement));
+        if (!claimed.isEmpty()) {
+            startClaimedSplits(claimed);
             return;
         }
 
@@ -245,22 +244,27 @@ public class ThreadPerDriverTaskExecutor
     }
 
     // The finished task refills up to its guaranteed minimum. Slots above it rotate across tasks.
+    // Idle scheduler slots then take splits above the target global leaf drivers.
     @GuardedBy("this")
-    @Nullable
-    private ClaimedLeafSplit claimReplacementLeafSplit(TaskEntry finishedTask)
+    private List<ClaimedLeafSplit> claimReplacementLeafSplits(TaskEntry finishedTask)
     {
         if (closed) {
-            return null;
+            return ImmutableList.of();
         }
 
-        List<ClaimedLeafSplit> claimed = new ArrayList<>(1);
-        if (finishedTask.runningLeafSplits() < minDriversPerTask && claimLeafSplit(finishedTask, claimed)) {
-            return claimed.getFirst();
+        List<ClaimedLeafSplit> claimed = new ArrayList<>();
+        if (finishedTask.runningLeafSplits() < minDriversPerTask) {
+            claimLeafSplit(finishedTask, claimed);
         }
-        if (runningLeafDrivers < targetGlobalLeafDrivers && claimNextLeafSplit(claimed)) {
-            return claimed.getFirst();
+        while (runningLeafDrivers < targetGlobalLeafDrivers) {
+            if (!claimNextLeafSplit(claimed)) {
+                break;
+            }
         }
-        return null;
+        if (runningLeafDrivers >= targetGlobalLeafDrivers) {
+            claimAboveFloor(claimed);
+        }
+        return claimed;
     }
 
     // Parked tasks take a slot only when no other task can, since their new drivers would wait too.

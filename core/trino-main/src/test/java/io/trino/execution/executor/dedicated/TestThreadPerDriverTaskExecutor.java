@@ -751,6 +751,49 @@ public class TestThreadPerDriverTaskExecutor
 
     @Test
     @Timeout(30)
+    public void testLeafCompletionAdmitsAboveFloorIntoIdleSlot()
+    {
+        FairScheduler scheduler = FairScheduler.newInstance(2);
+        ThreadPerDriverTaskExecutor executor = new ThreadPerDriverTaskExecutor(noopTracer(), testingVersionEmbedder(), scheduler, 1, 4, 1);
+        // splits are scheduled only by enqueueSplits, by leaf splits that block on their source, and by leaf completions
+        CountDownLatch finishingSplitStarted = new CountDownLatch(1);
+        CountDownLatch finishingSplitReleased = new CountDownLatch(1);
+        try {
+            TaskHandle taskHandle = addLeafAdmissionTask(executor, "test", new TestingTaskMemory(DataSize.of(1, MEGABYTE), DataSize.of(1, GIGABYTE), DataSize.of(1, GIGABYTE)));
+            AdmissionSplit busySplit = new AdmissionSplit(BlockedReason.OUTPUT, true);
+            executor.enqueueSplits(taskHandle, true, ImmutableList.of(busySplit));
+            assertEventually(new Duration(10, SECONDS), () -> assertThat(busySplit.isStarted()).isTrue());
+
+            TestingSplitRunner finishingSplit = new TestingSplitRunner(ImmutableList.of(_ -> {
+                finishingSplitStarted.countDown();
+                awaitUninterruptibly(finishingSplitReleased);
+                return immediateVoidFuture();
+            }));
+            AdmissionSplit replacementSplit = new AdmissionSplit(BlockedReason.OUTPUT, true);
+            AdmissionSplit admittedSplit = new AdmissionSplit(BlockedReason.SOURCE, true);
+            executor.enqueueSplits(taskHandle, false, ImmutableList.of(finishingSplit, replacementSplit, admittedSplit));
+            awaitUninterruptibly(finishingSplitStarted);
+            assertThat(executor.getLeafSplitsAdmittedAboveFloor()).isEqualTo(0);
+
+            busySplit.release();
+            assertEventually(new Duration(10, SECONDS), () -> assertThat(executor.getBlockedSplits()).isEqualTo(1));
+            finishingSplitReleased.countDown();
+
+            assertEventually(new Duration(10, SECONDS), () -> assertThat(replacementSplit.isStarted()).isTrue());
+            assertEventually(new Duration(10, SECONDS), () -> assertThat(admittedSplit.isStarted()).isTrue());
+            assertThat(executor.getLeafSplitsAdmittedAboveFloor()).isEqualTo(1);
+            replacementSplit.release();
+            admittedSplit.release();
+            executor.removeTask(taskHandle);
+        }
+        finally {
+            finishingSplitReleased.countDown();
+            executor.stop();
+        }
+    }
+
+    @Test
+    @Timeout(30)
     public void testLeafAdmissionRefusedWithoutEstimate()
     {
         FairScheduler scheduler = FairScheduler.newInstance(4);
