@@ -51,6 +51,7 @@ import java.util.function.Function;
 
 import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
 import static com.google.common.util.concurrent.Uninterruptibles.awaitUninterruptibly;
+import static com.google.common.util.concurrent.Uninterruptibles.sleepUninterruptibly;
 import static io.airlift.concurrent.MoreFutures.getFutureValue;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static io.airlift.tracing.Tracing.noopTracer;
@@ -345,8 +346,10 @@ public class TestThreadPerDriverTaskExecutor
                 testingVersionEmbedder(),
                 noopTracer(),
                 1,
+                new Duration(1, MILLISECONDS),
                 () -> 0,
-                (_, _, _) -> () -> {});
+                (_, _, _) -> () -> {},
+                () -> {});
         TestingSplitRunner failing = new CloseFailingSplitRunner();
         TestingSplitRunner pending = new TestingSplitRunner(ImmutableList.of(_ -> Futures.immediateVoidFuture()));
         ListenableFuture<Void> claimedDone = task.enqueueLeafSplit(failing);
@@ -713,6 +716,91 @@ public class TestThreadPerDriverTaskExecutor
     }
 
     // Blocks a split of the task on its source and returns its queued split once another query's split is admitted.
+    @Test
+    @Timeout(30)
+    public void testTargetConcurrencyRiseStartsQueuedSplit()
+    {
+        FairScheduler scheduler = FairScheduler.newInstance(4);
+        ThreadPerDriverTaskExecutor executor = new ThreadPerDriverTaskExecutor(noopTracer(), testingVersionEmbedder(), scheduler, 1, 4, 4);
+        // no periodic passes run, so only the target concurrency rise can start the queued split
+        scheduler.start();
+        CountDownLatch busySplitReleased = new CountDownLatch(1);
+        try {
+            TaskEntry task = (TaskEntry) executor.addTask(new TaskId(new StageId("query", 0), 0, 0), () -> 0, 1, new Duration(1, MILLISECONDS), OptionalInt.empty());
+            TestingSplitRunner busySplit = new TestingSplitRunner(ImmutableList.of(
+                    _ -> {
+                        sleepUninterruptibly(5, MILLISECONDS);
+                        return immediateVoidFuture();
+                    },
+                    _ -> {
+                        awaitUninterruptibly(busySplitReleased);
+                        return immediateVoidFuture();
+                    }));
+            AdmissionSplit queuedSplit = new AdmissionSplit(BlockedReason.SOURCE, false);
+            executor.enqueueSplits(task, false, ImmutableList.of(busySplit, queuedSplit));
+
+            assertEventually(new Duration(10, SECONDS), () -> assertThat(queuedSplit.isStarted()).isTrue());
+            assertThat(task.targetConcurrency()).isEqualTo(2);
+            assertThat(busySplit.isFinished()).isFalse();
+            busySplitReleased.countDown();
+            executor.removeTask(task);
+        }
+        finally {
+            busySplitReleased.countDown();
+            executor.stop();
+        }
+    }
+
+    @Test
+    @Timeout(30)
+    public void testTargetConcurrencyHoldsWhileOutputBlocks()
+            throws InterruptedException
+    {
+        FairScheduler scheduler = FairScheduler.newInstance(4);
+        ThreadPerDriverTaskExecutor executor = new ThreadPerDriverTaskExecutor(noopTracer(), testingVersionEmbedder(), scheduler, 1, 4, 4);
+        executor.start();
+        try {
+            TaskEntry task = (TaskEntry) executor.addTask(new TaskId(new StageId("query", 0), 0, 0), () -> 1, 4, new Duration(1, MILLISECONDS), OptionalInt.empty());
+            executor.enqueueSplits(task, false, ImmutableList.of(
+                    new AdmissionSplit(BlockedReason.OUTPUT, false),
+                    new AdmissionSplit(BlockedReason.OUTPUT, false),
+                    new AdmissionSplit(BlockedReason.OUTPUT, false),
+                    new AdmissionSplit(BlockedReason.OUTPUT, false)));
+            assertEventually(new Duration(10, SECONDS), () -> assertThat(executor.getBlockedSplits()).isEqualTo(4));
+
+            MILLISECONDS.sleep(200);
+            assertThat(task.targetConcurrency()).isEqualTo(4);
+            executor.removeTask(task);
+        }
+        finally {
+            executor.stop();
+        }
+    }
+
+    @Test
+    @Timeout(30)
+    public void testTargetConcurrencyHoldsWhileSourceBlocks()
+            throws InterruptedException
+    {
+        FairScheduler scheduler = FairScheduler.newInstance(4);
+        ThreadPerDriverTaskExecutor executor = new ThreadPerDriverTaskExecutor(noopTracer(), testingVersionEmbedder(), scheduler, 1, 4, 4);
+        executor.start();
+        try {
+            TaskEntry task = (TaskEntry) executor.addTask(new TaskId(new StageId("query", 0), 0, 0), () -> 0, 1, new Duration(100, MILLISECONDS), OptionalInt.empty());
+            AdmissionSplit queuedSplit = new AdmissionSplit(BlockedReason.SOURCE, false);
+            executor.enqueueSplits(task, false, ImmutableList.of(new AdmissionSplit(BlockedReason.SOURCE, false), queuedSplit));
+            assertEventually(new Duration(10, SECONDS), () -> assertThat(executor.getBlockedSplits()).isEqualTo(1));
+
+            MILLISECONDS.sleep(300);
+            assertThat(task.targetConcurrency()).isEqualTo(1);
+            assertThat(queuedSplit.isStarted()).isFalse();
+            executor.removeTask(task);
+        }
+        finally {
+            executor.stop();
+        }
+    }
+
     private static AdmissionSplit assertLeafAdmissionRefused(ThreadPerDriverTaskExecutor executor, TaskHandle taskHandle)
     {
         AdmissionSplit blockedSplit = new AdmissionSplit(BlockedReason.SOURCE, false);
