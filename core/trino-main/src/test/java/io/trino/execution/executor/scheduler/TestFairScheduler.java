@@ -21,6 +21,7 @@ import io.airlift.testing.TestingTicker;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
@@ -29,12 +30,17 @@ import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.IntStream;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
 import static com.google.common.util.concurrent.Uninterruptibles.awaitUninterruptibly;
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
 import static java.util.concurrent.Executors.newSingleThreadExecutor;
+import static java.util.concurrent.TimeUnit.MILLISECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -62,7 +68,6 @@ public class TestFairScheduler
         };
 
         FairScheduler scheduler = new FairScheduler(2, threadFactory, Ticker.systemTicker());
-        scheduler.start();
         ExecutorService submitter = newSingleThreadExecutor(daemonThreadsNamed("submitter"));
         try {
             Group group = scheduler.createGroup("G1");
@@ -102,7 +107,6 @@ public class TestFairScheduler
         };
 
         FairScheduler scheduler = new FairScheduler(1, threadFactory, Ticker.systemTicker());
-        scheduler.start();
         Group group = scheduler.createGroup("G");
         ExecutorService executor = newSingleThreadExecutor(daemonThreadsNamed("submitter"));
         try {
@@ -326,6 +330,51 @@ public class TestFairScheduler
             task1.get();
             assertThat(counter.get()).isEqualTo(1);
             assertThat(scheduler.getTasks(group)).isEmpty();
+        }
+    }
+
+    @Test
+    @Timeout(30)
+    public void testManyTasksBlockingOnFewSlots()
+            throws ExecutionException, InterruptedException
+    {
+        try (FairScheduler scheduler = FairScheduler.newInstance(2)) {
+            Group group = scheduler.createGroup("G");
+
+            List<ListenableFuture<Void>> tasks = IntStream.range(0, 20)
+                    .mapToObj(id -> scheduler.submit(group, id, context -> {
+                        for (int i = 0; i < 1000; i++) {
+                            if (!context.block(immediateVoidFuture())) {
+                                return;
+                            }
+                        }
+                    }))
+                    .collect(toImmutableList());
+
+            for (ListenableFuture<Void> task : tasks) {
+                task.get();
+            }
+            assertThat(scheduler.getConcurrencyControlAvailableSlots()).isEqualTo(2);
+        }
+    }
+
+    @Test
+    @Timeout(10)
+    public void testResumeDispatchesQueuedTask()
+            throws ExecutionException, InterruptedException
+    {
+        try (FairScheduler scheduler = FairScheduler.newInstance(1)) {
+            Group group = scheduler.createGroup("G");
+            scheduler.pause();
+
+            AtomicBoolean ran = new AtomicBoolean();
+            ListenableFuture<Void> task = scheduler.submit(group, 1, _ -> ran.set(true));
+            assertThatThrownBy(() -> task.get(100, MILLISECONDS))
+                    .isInstanceOf(TimeoutException.class);
+
+            scheduler.resume();
+            task.get();
+            assertThat(ran.get()).isTrue();
         }
     }
 
