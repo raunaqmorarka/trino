@@ -264,13 +264,23 @@ public class ThreadPerDriverTaskExecutor
         return null;
     }
 
-    // Claims a split from the first task in rotation below its target concurrency and moves that task to the back.
+    // Parked tasks take a slot only when no other task can, since their new drivers would wait too.
     @GuardedBy("this")
     private boolean claimNextLeafSplit(List<ClaimedLeafSplit> claimed)
+    {
+        return claimNextLeafSplit(claimed, false) || claimNextLeafSplit(claimed, true);
+    }
+
+    // Claims a split from the first task in rotation below its target concurrency and moves that task to the back.
+    @GuardedBy("this")
+    private boolean claimNextLeafSplit(List<ClaimedLeafSplit> claimed, boolean includeParked)
     {
         for (Iterator<TaskEntry> iterator = leafSplitRotation.iterator(); iterator.hasNext(); ) {
             TaskEntry task = iterator.next();
             if (task.runningLeafSplits() >= min(task.targetConcurrency(), maxDriversPerTask)) {
+                continue;
+            }
+            if (task.isParked() && !includeParked) {
                 continue;
             }
             if (claimLeafSplit(task, claimed)) {

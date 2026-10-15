@@ -425,6 +425,51 @@ public class TestThreadPerDriverTaskExecutor
     }
 
     @Test
+    @Timeout(30)
+    public void testLeafCompletionPrefersUnparkedTask()
+            throws Exception
+    {
+        FairScheduler scheduler = FairScheduler.newInstance(2);
+        ThreadPerDriverTaskExecutor executor = new ThreadPerDriverTaskExecutor(noopTracer(), testingVersionEmbedder(), scheduler, 0, 10, 2);
+        try {
+            TaskEntry parkedTask = (TaskEntry) executor.addTask(new TaskId(new StageId("query", 1), 1, 1), () -> 0, 10, new Duration(1, MILLISECONDS), OptionalInt.empty());
+            executor.enqueueSplits(parkedTask, false, ImmutableList.of(new AdmissionSplit(BlockedReason.OPERATOR, false)));
+            assertEventually(new Duration(10, SECONDS), () -> assertThat(executor.getBlockedSplits()).isEqualTo(1));
+
+            TaskEntry otherTask = (TaskEntry) executor.addTask(new TaskId(new StageId("query", 1), 2, 1), () -> 0, 10, new Duration(1, MILLISECONDS), OptionalInt.empty());
+            TestFuture firstBlocked = new TestFuture();
+            ListenableFuture<Void> firstDone = otherTask.enqueueLeafSplit(new SourceBlockedSplitRunner(ImmutableList.of(_ -> firstBlocked, _ -> immediateVoidFuture())));
+            executor.scheduleMoreLeafSplits();
+            firstBlocked.awaitListenerAdded();
+
+            AdmissionSplit parkedTaskQueuedSplit = new AdmissionSplit(BlockedReason.OPERATOR, false);
+            executor.enqueueSplits(parkedTask, false, ImmutableList.of(parkedTaskQueuedSplit));
+            TestFuture secondBlocked = new TestFuture();
+            CountDownLatch secondStarted = new CountDownLatch(1);
+            ListenableFuture<Void> secondDone = otherTask.enqueueLeafSplit(new SourceBlockedSplitRunner(ImmutableList.of(
+                    _ -> {
+                        secondStarted.countDown();
+                        return secondBlocked;
+                    },
+                    _ -> immediateVoidFuture())));
+
+            firstBlocked.set(null);
+            firstDone.get(10, TimeUnit.SECONDS);
+            assertThat(secondStarted.await(10, TimeUnit.SECONDS)).isTrue();
+            assertThat(parkedTaskQueuedSplit.isStarted()).isFalse();
+
+            secondBlocked.set(null);
+            secondDone.get(10, TimeUnit.SECONDS);
+            assertEventually(new Duration(10, SECONDS), () -> assertThat(parkedTaskQueuedSplit.isStarted()).isTrue());
+            executor.removeTask(parkedTask);
+            executor.removeTask(otherTask);
+        }
+        finally {
+            executor.stop();
+        }
+    }
+
+    @Test
     public void testDestroyCompletesEveryLeafFutureWhenCloseFails()
             throws Exception
     {
@@ -1025,6 +1070,21 @@ public class TestThreadPerDriverTaskExecutor
         {
             super.close();
             throw new RuntimeException("close failed");
+        }
+    }
+
+    private static class SourceBlockedSplitRunner
+            extends TestingSplitRunner
+    {
+        public SourceBlockedSplitRunner(List<Function<Duration, ListenableFuture<Void>>> invocations)
+        {
+            super(invocations);
+        }
+
+        @Override
+        public BlockedReason getBlockedReason()
+        {
+            return BlockedReason.SOURCE;
         }
     }
 
