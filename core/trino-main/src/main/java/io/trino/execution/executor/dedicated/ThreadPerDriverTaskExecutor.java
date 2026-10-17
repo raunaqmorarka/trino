@@ -251,7 +251,7 @@ public class ThreadPerDriverTaskExecutor
         }
 
         List<ClaimedLeafSplit> claimed = new ArrayList<>();
-        if (finishedTask.runningLeafSplits() < minDriversPerTask) {
+        if (finishedTask.runningLeafSplits() < minDriversPerTask || (runningLeafDrivers < targetGlobalLeafDrivers && isBelowTarget(finishedTask))) {
             claimLeafSplit(finishedTask, claimed);
         }
         while (runningLeafDrivers < targetGlobalLeafDrivers) {
