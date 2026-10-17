@@ -47,6 +47,7 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.DoubleSupplier;
 import java.util.function.Function;
 
 import static com.google.common.util.concurrent.Futures.immediateVoidFuture;
@@ -678,6 +679,38 @@ public class TestThreadPerDriverTaskExecutor
 
     @Test
     @Timeout(30)
+    public void testLeafAdmissionSkipsTaskWithBackloggedOutput()
+    {
+        FairScheduler scheduler = FairScheduler.newInstance(4);
+        ThreadPerDriverTaskExecutor executor = new ThreadPerDriverTaskExecutor(noopTracer(), testingVersionEmbedder(), scheduler, 1, 4, 1);
+        // splits are scheduled only by enqueueSplits and by leaf splits that block on their source
+        try {
+            TaskHandle backloggedTask = addLeafAdmissionTask(executor, "backlogged", () -> 1.0, new TestingTaskMemory(DataSize.of(1, MEGABYTE), DataSize.of(1, GIGABYTE), DataSize.of(1, GIGABYTE)));
+            AdmissionSplit backloggedSplit = new AdmissionSplit(BlockedReason.SOURCE, false);
+            AdmissionSplit backloggedTaskQueuedSplit = new AdmissionSplit(BlockedReason.SOURCE, false);
+            executor.enqueueSplits(backloggedTask, false, ImmutableList.of(backloggedSplit, backloggedTaskQueuedSplit));
+            assertEventually(new Duration(10, SECONDS), () -> assertThat(executor.getBlockedSplits()).isEqualTo(1));
+
+            TaskHandle readingTask = addLeafAdmissionTask(executor, "reading", new TestingTaskMemory(DataSize.of(1, MEGABYTE), DataSize.of(1, GIGABYTE), DataSize.of(1, GIGABYTE)));
+            AdmissionSplit readingSplit = new AdmissionSplit(BlockedReason.SOURCE, false);
+            AdmissionSplit readingTaskQueuedSplit = new AdmissionSplit(BlockedReason.SOURCE, false);
+            executor.enqueueSplits(readingTask, false, ImmutableList.of(readingSplit, readingTaskQueuedSplit));
+
+            assertEventually(new Duration(10, SECONDS), () -> assertThat(executor.getBlockedSplits()).isEqualTo(3));
+            assertThat(readingTaskQueuedSplit.isStarted()).isTrue();
+            assertThat(backloggedTaskQueuedSplit.isStarted()).isFalse();
+            assertThat(executor.getLeafSplitsAdmittedAboveFloor()).isEqualTo(1);
+            executor.removeTask(backloggedTask);
+            executor.removeTask(readingTask);
+            assertEventually(new Duration(10, SECONDS), () -> assertThat(executor.getBlockedSplits()).isEqualTo(0));
+        }
+        finally {
+            executor.stop();
+        }
+    }
+
+    @Test
+    @Timeout(30)
     public void testLeafAdmissionStartsBuildScanBehindParkedProbe()
     {
         FairScheduler scheduler = FairScheduler.newInstance(4);
@@ -972,7 +1005,7 @@ public class TestThreadPerDriverTaskExecutor
             throws InterruptedException
     {
         FairScheduler scheduler = FairScheduler.newInstance(4);
-        ThreadPerDriverTaskExecutor executor = new ThreadPerDriverTaskExecutor(noopTracer(), testingVersionEmbedder(), scheduler, 1, 4, 4);
+        ThreadPerDriverTaskExecutor executor = new ThreadPerDriverTaskExecutor(noopTracer(), testingVersionEmbedder(), scheduler, 4, 4, 4);
         executor.start();
         try {
             TaskEntry task = (TaskEntry) executor.addTask(new TaskId(new StageId("query", 0), 0, 0), () -> 1, 4, new Duration(1, MILLISECONDS), OptionalInt.empty());
@@ -1036,7 +1069,12 @@ public class TestThreadPerDriverTaskExecutor
 
     private static TaskHandle addLeafAdmissionTask(ThreadPerDriverTaskExecutor executor, String queryId, TaskMemory taskMemory)
     {
-        TaskHandle taskHandle = executor.addTask(new TaskId(new StageId(queryId, 0), 0, 0), () -> 0, 4, new Duration(1, MILLISECONDS), OptionalInt.empty());
+        return addLeafAdmissionTask(executor, queryId, () -> 0, taskMemory);
+    }
+
+    private static TaskHandle addLeafAdmissionTask(ThreadPerDriverTaskExecutor executor, String queryId, DoubleSupplier utilization, TaskMemory taskMemory)
+    {
+        TaskHandle taskHandle = executor.addTask(new TaskId(new StageId(queryId, 0), 0, 0), utilization, 4, new Duration(1, MILLISECONDS), OptionalInt.empty());
         taskHandle.setTaskMemory(taskMemory);
         return taskHandle;
     }

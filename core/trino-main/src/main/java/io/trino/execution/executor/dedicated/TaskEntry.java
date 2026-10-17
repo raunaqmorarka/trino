@@ -50,6 +50,8 @@ import static java.util.Objects.requireNonNull;
 class TaskEntry
         implements TaskHandle
 {
+    private static final double OUTPUT_BACKLOG_UTILIZATION = 0.5;
+
     private final TaskId taskId;
     private final Group group;
     private final FairScheduler scheduler;
@@ -353,6 +355,12 @@ class TaskEntry
     public synchronized boolean hasPendingLeafSplits()
     {
         return !pending.isEmpty();
+    }
+
+    // The output buffer is over half full.
+    public boolean isOutputBacklogged()
+    {
+        return utilization.getAsDouble() > OUTPUT_BACKLOG_UTILIZATION;
     }
 
     public synchronized int targetConcurrency()

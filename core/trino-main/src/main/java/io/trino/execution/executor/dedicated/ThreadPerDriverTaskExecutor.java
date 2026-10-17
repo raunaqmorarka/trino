@@ -272,13 +272,13 @@ public class ThreadPerDriverTaskExecutor
         return claimNextLeafSplit(claimed, false) || claimNextLeafSplit(claimed, true);
     }
 
-    // Claims a split from the first task in rotation below its target concurrency and moves that task to the back.
+    // Claims a split from the first task in rotation below its target concurrency with a free output buffer, and moves that task to the back.
     @GuardedBy("this")
     private boolean claimNextLeafSplit(List<ClaimedLeafSplit> claimed, boolean includeParked)
     {
         for (Iterator<TaskEntry> iterator = leafSplitRotation.iterator(); iterator.hasNext(); ) {
             TaskEntry task = iterator.next();
-            if (!isBelowTarget(task)) {
+            if (!isBelowTarget(task) || task.isOutputBacklogged()) {
                 continue;
             }
             if (task.isParked() && !includeParked) {
@@ -446,13 +446,13 @@ public class ThreadPerDriverTaskExecutor
         }
     }
 
-    // Claims a split from the first task in rotation that is below its target concurrency and fits the budget, and moves that task to the back.
+    // Claims a split from the first task in rotation that is below its target concurrency, has a free output buffer and fits the budget, and moves that task to the back.
     @GuardedBy("this")
     private boolean claimNextAboveFloor(LeafSplitAdmissionBudget budget, List<ClaimedLeafSplit> claimed)
     {
         for (Iterator<TaskEntry> iterator = leafSplitRotation.iterator(); iterator.hasNext(); ) {
             TaskEntry task = iterator.next();
-            if (!isBelowTarget(task) || task.isParked() || !task.hasPendingLeafSplits()) {
+            if (!isBelowTarget(task) || task.isOutputBacklogged() || task.isParked() || !task.hasPendingLeafSplits()) {
                 continue;
             }
             long estimate = budget.admissibleEstimate(task.taskId(), task.getLeafMemoryEstimate(), task.runningLeafSplits(), System.nanoTime());
