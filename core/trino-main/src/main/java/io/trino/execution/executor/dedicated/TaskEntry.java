@@ -16,12 +16,10 @@ package io.trino.execution.executor.dedicated;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
 import com.google.errorprone.annotations.concurrent.GuardedBy;
-import io.airlift.units.Duration;
 import io.opentelemetry.api.trace.Tracer;
 import io.trino.execution.SplitRunner;
 import io.trino.execution.TaskId;
 import io.trino.execution.executor.LeafSplitMemoryEstimate;
-import io.trino.execution.executor.SplitConcurrencyController;
 import io.trino.execution.executor.TaskHandle;
 import io.trino.execution.executor.TaskMemory;
 import io.trino.execution.executor.scheduler.FairScheduler;
@@ -38,7 +36,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.DoubleSupplier;
 import java.util.function.LongConsumer;
@@ -57,14 +54,13 @@ class TaskEntry
     private final Tracer tracer;
     private final DoubleSupplier utilization;
     private final SplitBlockedListener splitBlockedListener;
-    private final Runnable targetConcurrencyIncreased;
     private final AtomicInteger nextSplitId = new AtomicInteger();
     private final LeafSplitMemoryEstimate leafMemoryEstimate = new LeafSplitMemoryEstimate();
     // Leaf splits blocked on their output or on another operator.
     private final AtomicInteger parkedLeafSplits = new AtomicInteger();
 
     @GuardedBy("this")
-    private final SplitConcurrencyController concurrency;
+    private final ConcurrencyController concurrency;
 
     private volatile boolean destroyed;
 
@@ -83,10 +79,8 @@ class TaskEntry
             VersionEmbedder versionEmbedder,
             Tracer tracer,
             int initialConcurrency,
-            Duration concurrencyAdjustmentInterval,
             DoubleSupplier utilization,
-            SplitBlockedListener splitBlockedListener,
-            Runnable targetConcurrencyIncreased)
+            SplitBlockedListener splitBlockedListener)
     {
         this.taskId = requireNonNull(taskId, "taskId is null");
         this.scheduler = requireNonNull(scheduler, "scheduler is null");
@@ -94,10 +88,9 @@ class TaskEntry
         this.tracer = requireNonNull(tracer, "tracer is null");
         this.utilization = requireNonNull(utilization, "utilization is null");
         this.splitBlockedListener = requireNonNull(splitBlockedListener, "splitBlockedListener is null");
-        this.targetConcurrencyIncreased = requireNonNull(targetConcurrencyIncreased, "targetConcurrencyIncreased is null");
 
         this.group = scheduler.createGroup(taskId.toString());
-        this.concurrency = new SplitConcurrencyController(initialConcurrency, concurrencyAdjustmentInterval);
+        this.concurrency = new ConcurrencyController(initialConcurrency);
     }
 
     public TaskId taskId()
@@ -197,14 +190,9 @@ class TaskEntry
     /// If this throws, the claim was not consumed and must be requeued via [#releaseLeafSplit].
     public void startLeafSplit(QueuedSplit split, Consumer<TaskEntry> doneCallback)
     {
-        AtomicLong scheduledNanos = new AtomicLong();
-        LongConsumer quantumProcessed = nanos -> {
-            scheduledNanos.addAndGet(nanos);
-            splitProcessed(nanos);
-        };
-        submit(split.split(), true, quantumProcessed)
+        submit(split.split(), true, _ -> {})
                 .addListener(() -> {
-                    finishLeafSplit(split, scheduledNanos.get(), doneCallback);
+                    finishLeafSplit(split, doneCallback);
                 }, directExecutor());
     }
 
@@ -227,14 +215,10 @@ class TaskEntry
         }
     }
 
-    private void finishLeafSplit(QueuedSplit split, long scheduledNanos, Consumer<TaskEntry> doneCallback)
+    private void finishLeafSplit(QueuedSplit split, Consumer<TaskEntry> doneCallback)
     {
         boolean close;
-        boolean targetIncreased;
         synchronized (this) {
-            int previousTarget = concurrency.getTargetConcurrency();
-            concurrency.splitFinished(scheduledNanos, utilization.getAsDouble(), runningLeafSplits.size());
-            targetIncreased = concurrency.getTargetConcurrency() > previousTarget;
             runningLeafSplits.remove(split);
             close = running.remove(split.split());
         }
@@ -248,23 +232,6 @@ class TaskEntry
         }
         finally {
             doneCallback.accept(this);
-            if (targetIncreased) {
-                targetConcurrencyIncreased.run();
-            }
-        }
-    }
-
-    // Adjusts the target concurrency by the thread time the task's splits consume.
-    private void splitProcessed(long scheduledNanos)
-    {
-        boolean targetIncreased;
-        synchronized (this) {
-            int previousTarget = concurrency.getTargetConcurrency();
-            concurrency.update(scheduledNanos, utilization.getAsDouble(), runningLeafSplits.size());
-            targetIncreased = concurrency.getTargetConcurrency() > previousTarget;
-        }
-        if (targetIncreased) {
-            targetConcurrencyIncreased.run();
         }
     }
 
@@ -286,7 +253,7 @@ class TaskEntry
         }
 
         try {
-            ListenableFuture<Void> done = submit(split, false, this::splitProcessed);
+            ListenableFuture<Void> done = submit(split, false, _ -> {});
             done.addListener(() -> splitDone(split), directExecutor());
             return done;
         }
@@ -355,9 +322,14 @@ class TaskEntry
         return !pending.isEmpty();
     }
 
+    public synchronized void updateConcurrency()
+    {
+        concurrency.update(utilization.getAsDouble(), runningLeafSplits.size());
+    }
+
     public synchronized int targetConcurrency()
     {
-        return concurrency.getTargetConcurrency();
+        return concurrency.targetConcurrency();
     }
 
     @Override
