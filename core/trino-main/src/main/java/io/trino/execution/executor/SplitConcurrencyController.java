@@ -57,7 +57,6 @@ public class SplitConcurrencyController
         checkArgument(utilization >= 0, "utilization is negative");
 
         if (utilization > TARGET_UTILIZATION && targetConcurrency > 1) {
-            threadNanosSinceLastAdjustment = 0;
             targetConcurrency--;
         }
     }
