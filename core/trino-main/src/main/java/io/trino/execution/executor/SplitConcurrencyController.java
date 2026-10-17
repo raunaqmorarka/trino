@@ -51,6 +51,17 @@ public class SplitConcurrencyController
         }
     }
 
+    public void decreaseIfOverUtilized(double utilization)
+    {
+        checkArgument(isFinite(utilization), "utilization must be finite");
+        checkArgument(utilization >= 0, "utilization is negative");
+
+        if (utilization > TARGET_UTILIZATION && targetConcurrency > 1) {
+            threadNanosSinceLastAdjustment = 0;
+            targetConcurrency--;
+        }
+    }
+
     public int getTargetConcurrency()
     {
         checkState(targetConcurrency > 0, "Possible deadlock detected. Target concurrency is zero");

@@ -268,6 +268,12 @@ class TaskEntry
         }
     }
 
+    // Lowers the target concurrency while the output buffer is over half full.
+    public synchronized void decreaseConcurrencyIfOutputFull()
+    {
+        concurrency.decreaseIfOverUtilized(utilization.getAsDouble());
+    }
+
     public ListenableFuture<Void> runSplit(SplitRunner split)
     {
         boolean destroyed;
