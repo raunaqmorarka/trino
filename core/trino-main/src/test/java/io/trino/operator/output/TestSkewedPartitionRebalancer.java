@@ -23,7 +23,9 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.IntStream;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -337,9 +339,9 @@ class TestSkewedPartitionRebalancer
     }
 
     @Test
-    void testNoRebalanceWhenPartitionIsNotSkewedAgainstTargetTaskBucket()
+    void testNoRebalanceWhenPartitionIsNotLargerThanTargetTaskBucket()
     {
-        int partitionCount = 8;
+        int partitionCount = 16;
         SkewedPartitionRebalancer rebalancer = new SkewedPartitionRebalancer(
                 partitionCount,
                 2,
@@ -347,29 +349,26 @@ class TestSkewedPartitionRebalancer
                 MIN_PARTITION_DATA_PROCESSED_REBALANCE_THRESHOLD,
                 MIN_DATA_PROCESSED_REBALANCE_THRESHOLD);
 
-        // Task0 (Bucket0) holds partitions 0 and 4, Task1 (Bucket1) holds partitions 3 and 7
-        rebalancer.addPartitionRowCount(0, 200);
-        rebalancer.addPartitionRowCount(4, 200);
-        rebalancer.addPartitionRowCount(2, 150);
-        rebalancer.addPartitionRowCount(6, 150);
-        rebalancer.addPartitionRowCount(1, 150);
-        rebalancer.addPartitionRowCount(5, 150);
-        rebalancer.addPartitionRowCount(3, 50);
-        rebalancer.addPartitionRowCount(7, 50);
+        // Task0 (Bucket0) holds partitions 0, 4, 8 and 12, Task1 (Bucket1) holds partitions 3, 7, 11 and 15
+        for (int partition = 0; partition < partitionCount; partition++) {
+            if (partition % 4 == 0) {
+                rebalancer.addPartitionRowCount(partition, 100);
+            }
+            else if (partition % 4 == 3) {
+                rebalancer.addPartitionRowCount(partition, 26);
+            }
+            else {
+                rebalancer.addPartitionRowCount(partition, 75);
+            }
+        }
         rebalancer.addDataProcessed(DataSize.of(60, MEGABYTE).toBytes());
-        // Task buckets are skewed, but each partition of the max task bucket is less than 3.3x the min task bucket
+        // Task buckets are skewed, but no partition of the max task bucket is larger than the min task bucket
         rebalancer.rebalance();
 
         assertThat(rebalancer.getPartitionAssignments())
-                .containsExactly(
-                        ImmutableList.of(0),
-                        ImmutableList.of(1),
-                        ImmutableList.of(0),
-                        ImmutableList.of(1),
-                        ImmutableList.of(0),
-                        ImmutableList.of(1),
-                        ImmutableList.of(0),
-                        ImmutableList.of(1));
+                .isEqualTo(IntStream.range(0, partitionCount)
+                        .mapToObj(partition -> ImmutableList.of(partition % 2))
+                        .collect(toImmutableList()));
     }
 
     @Test
@@ -401,6 +400,38 @@ class TestSkewedPartitionRebalancer
                         ImmutableList.of(1),
                         ImmutableList.of(0),
                         ImmutableList.of(1));
+    }
+
+    @Test
+    void testRebalancePartitionsLargerThanTargetTaskBucket()
+    {
+        int partitionCount = 8;
+        SkewedPartitionRebalancer rebalancer = new SkewedPartitionRebalancer(
+                partitionCount,
+                4,
+                1,
+                MIN_PARTITION_DATA_PROCESSED_REBALANCE_THRESHOLD,
+                MIN_DATA_PROCESSED_REBALANCE_THRESHOLD);
+
+        // Task0 holds partitions 0 and 4, Task1 holds partitions 1 and 5, Task2 and Task3 hold none
+        rebalancer.addPartitionRowCount(0, 1000);
+        rebalancer.addPartitionRowCount(4, 1000);
+        rebalancer.addPartitionRowCount(1, 1000);
+        rebalancer.addPartitionRowCount(5, 1000);
+        rebalancer.addDataProcessed(DataSize.of(60, MEGABYTE).toBytes());
+        // Partitions 1 and 5 move to task buckets that already hold half of partition 0 or 4
+        rebalancer.rebalance();
+
+        assertThat(rebalancer.getPartitionAssignments())
+                .containsExactly(
+                        ImmutableList.of(0, 2),
+                        ImmutableList.of(1, 2),
+                        ImmutableList.of(2),
+                        ImmutableList.of(3),
+                        ImmutableList.of(0, 3),
+                        ImmutableList.of(1, 3),
+                        ImmutableList.of(2),
+                        ImmutableList.of(3));
     }
 
     private static List<List<Integer>> getPartitionPositions(PartitionFunction function, int maxPosition)

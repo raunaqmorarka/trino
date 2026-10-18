@@ -353,9 +353,10 @@ public class SkewedPartitionRebalancer
                 continue;
             }
 
-            // A partition is never skewed against a task bucket that its own task bucket is not skewed against
+            // Task buckets polled later are not skewed against any task bucket either
+            long maxTaskBucketDataSize = estimatedTaskBucketDataSizeSinceLastRebalance[maxTaskBucket.id];
             TaskBucket minTaskBucket = minTaskBuckets.peek();
-            if (!isSkewed(estimatedTaskBucketDataSizeSinceLastRebalance[maxTaskBucket.id], estimatedTaskBucketDataSizeSinceLastRebalance[minTaskBucket.id])) {
+            if (!isSkewed(maxTaskBucketDataSize, estimatedTaskBucketDataSizeSinceLastRebalance[minTaskBucket.id])) {
                 break;
             }
 
@@ -378,7 +379,7 @@ public class SkewedPartitionRebalancer
                     continue;
                 }
 
-                Optional<TaskBucket> skewedMinTaskBucket = findSkewedMinTaskBucket(maxPartition, minTaskBuckets);
+                Optional<TaskBucket> skewedMinTaskBucket = findSkewedMinTaskBucket(maxPartition, maxTaskBucketDataSize, minTaskBuckets);
                 if (skewedMinTaskBucket.isPresent()) {
                     rebalancePartition(maxPartition, skewedMinTaskBucket.get(), maxTaskBuckets, minTaskBuckets);
                     scaledPartitions[maxPartition] = true;
@@ -388,11 +389,16 @@ public class SkewedPartitionRebalancer
     }
 
     @GuardedBy("this")
-    private Optional<TaskBucket> findSkewedMinTaskBucket(int partition, IndexedPriorityQueue<TaskBucket> minTaskBuckets)
+    private Optional<TaskBucket> findSkewedMinTaskBucket(int partition, long maxTaskBucketDataSize, IndexedPriorityQueue<TaskBucket> minTaskBuckets)
     {
         List<TaskBucket> assignments = partitionAssignments.get(partition);
         for (TaskBucket minTaskBucket : minTaskBuckets) {
-            if (!isSkewed(partitionDataSizeSinceLastRebalancePerTask[partition], estimatedTaskBucketDataSizeSinceLastRebalance[minTaskBucket.id])) {
+            long minTaskBucketDataSize = estimatedTaskBucketDataSizeSinceLastRebalance[minTaskBucket.id];
+            if (!isSkewed(maxTaskBucketDataSize, minTaskBucketDataSize)) {
+                break;
+            }
+            // Moving a partition that is not larger than the destination task bucket splits it into small files
+            if (partitionDataSizeSinceLastRebalancePerTask[partition] <= minTaskBucketDataSize) {
                 break;
             }
             if (assignments.stream().noneMatch(taskBucket -> taskBucket.taskId == minTaskBucket.taskId)) {
