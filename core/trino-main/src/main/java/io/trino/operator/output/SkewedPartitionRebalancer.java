@@ -370,16 +370,15 @@ public class SkewedPartitionRebalancer
                 }
 
                 int totalAssignedTasks = partitionAssignments.get(maxPartition).size();
-                if (partitionDataSize[maxPartition] >= (minPartitionDataProcessedRebalanceThreshold * totalAssignedTasks)) {
-                    for (TaskBucket minTaskBucket : minSkewedTaskBuckets) {
-                        if (rebalancePartition(maxPartition, minTaskBucket, maxTaskBuckets, minTaskBuckets)) {
-                            scaledPartitions[maxPartition] = true;
-                            break;
-                        }
-                    }
+                if (partitionDataSize[maxPartition] < (minPartitionDataProcessedRebalanceThreshold * totalAssignedTasks)) {
+                    continue;
                 }
-                else {
-                    break;
+
+                for (TaskBucket minTaskBucket : minSkewedTaskBuckets) {
+                    if (rebalancePartition(maxPartition, minTaskBucket, maxTaskBuckets, minTaskBuckets)) {
+                        scaledPartitions[maxPartition] = true;
+                        break;
+                    }
                 }
             }
         }

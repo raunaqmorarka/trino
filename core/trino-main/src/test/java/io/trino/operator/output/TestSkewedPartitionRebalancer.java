@@ -247,6 +247,48 @@ class TestSkewedPartitionRebalancer
     }
 
     @Test
+    void testRebalanceSmallerPartitionAboveThreshold()
+    {
+        int partitionCount = 6;
+        long minPartitionDataProcessedRebalanceThreshold = DataSize.of(50, MEGABYTE).toBytes();
+        SkewedPartitionRebalancer rebalancer = new SkewedPartitionRebalancer(
+                partitionCount,
+                3,
+                1,
+                minPartitionDataProcessedRebalanceThreshold,
+                MIN_DATA_PROCESSED_REBALANCE_THRESHOLD);
+
+        rebalancer.addPartitionRowCount(1, 450);
+        rebalancer.addPartitionRowCount(3, 450);
+        rebalancer.addDataProcessed(DataSize.of(90, MEGABYTE).toBytes());
+        rebalancer.rebalance();
+
+        assertThat(rebalancer.getPartitionAssignments())
+                .containsExactly(
+                        ImmutableList.of(0),
+                        ImmutableList.of(1),
+                        ImmutableList.of(2),
+                        ImmutableList.of(0),
+                        ImmutableList.of(1),
+                        ImmutableList.of(2));
+
+        rebalancer.addPartitionRowCount(0, 400);
+        rebalancer.addPartitionRowCount(3, 100);
+        rebalancer.addDataProcessed(DataSize.of(50, MEGABYTE).toBytes());
+        // Partition 0 has more recent data but is under the threshold, while partition 3 in the same task bucket is above it
+        rebalancer.rebalance();
+
+        assertThat(rebalancer.getPartitionAssignments())
+                .containsExactly(
+                        ImmutableList.of(0),
+                        ImmutableList.of(1),
+                        ImmutableList.of(2),
+                        ImmutableList.of(0, 1),
+                        ImmutableList.of(1),
+                        ImmutableList.of(2));
+    }
+
+    @Test
     public void testConsiderSkewedPartitionOnlyWithinACycle()
     {
         int partitionCount = 3;
