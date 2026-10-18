@@ -34,6 +34,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicLong;
@@ -46,7 +47,6 @@ import static io.trino.SystemSessionProperties.getQueryMaxMemoryPerNode;
 import static io.trino.execution.resourcegroups.IndexedPriorityQueue.PriorityOrdering.LOW_TO_HIGH;
 import static io.trino.operator.RetryPolicy.TASK;
 import static io.trino.sql.planner.PartitioningHandle.isScaledWriterHashDistribution;
-import static java.lang.Double.isNaN;
 import static java.lang.Math.ceil;
 import static java.lang.Math.floorMod;
 import static java.lang.Math.max;
@@ -60,6 +60,9 @@ import static java.lang.Math.max;
  * 1. Mitigate skewness across tasks.
  * 2. Scale few big partitions across tasks even if there's no skewness among them. This will essentially speed the
  *    local scaling without impacting much overall resource utilization.
+ * <p>
+ * A partition moves to a task bucket only when its own data since the last rebalance is skewed against
+ * the data of that task bucket.
  * <p>
  * Example:
  * <p>
@@ -82,8 +85,8 @@ public class SkewedPartitionRebalancer
     // Keep the scale writers partition count big enough such that we could rebalance skewed partitions
     // at more granularity, thus leading to less resource utilization at writer stage.
     public static final int SCALE_WRITERS_PARTITION_COUNT = 4096;
-    // If the percentage difference between the two different task buckets with maximum and minimum processed bytes
-    // since last rebalance is above 0.7 (or 70%), then we consider them skewed.
+    // If the percentage difference between the processed bytes per task of a partition and the processed bytes of a
+    // task bucket since last rebalance is above 0.7 (or 70%), then we consider the partition skewed against it.
     private static final double TASK_BUCKET_SKEWNESS_THRESHOLD = 0.7;
 
     private final int partitionCount;
@@ -350,8 +353,9 @@ public class SkewedPartitionRebalancer
                 continue;
             }
 
-            List<TaskBucket> minSkewedTaskBuckets = findSkewedMinTaskBuckets(maxTaskBucket, minTaskBuckets);
-            if (minSkewedTaskBuckets.isEmpty()) {
+            // A partition is never skewed against a task bucket that its own task bucket is not skewed against
+            TaskBucket minTaskBucket = minTaskBuckets.peek();
+            if (!isSkewed(estimatedTaskBucketDataSizeSinceLastRebalance[maxTaskBucket.id], estimatedTaskBucketDataSizeSinceLastRebalance[minTaskBucket.id])) {
                 break;
             }
 
@@ -374,48 +378,46 @@ public class SkewedPartitionRebalancer
                     continue;
                 }
 
-                for (TaskBucket minTaskBucket : minSkewedTaskBuckets) {
-                    if (rebalancePartition(maxPartition, minTaskBucket, maxTaskBuckets, minTaskBuckets)) {
-                        scaledPartitions[maxPartition] = true;
-                        break;
-                    }
+                Optional<TaskBucket> skewedMinTaskBucket = findSkewedMinTaskBucket(maxPartition, minTaskBuckets);
+                if (skewedMinTaskBucket.isPresent()) {
+                    rebalancePartition(maxPartition, skewedMinTaskBucket.get(), maxTaskBuckets, minTaskBuckets);
+                    scaledPartitions[maxPartition] = true;
                 }
             }
         }
     }
 
     @GuardedBy("this")
-    private List<TaskBucket> findSkewedMinTaskBuckets(TaskBucket maxTaskBucket, IndexedPriorityQueue<TaskBucket> minTaskBuckets)
+    private Optional<TaskBucket> findSkewedMinTaskBucket(int partition, IndexedPriorityQueue<TaskBucket> minTaskBuckets)
     {
-        ImmutableList.Builder<TaskBucket> minSkewedTaskBuckets = ImmutableList.builder();
+        List<TaskBucket> assignments = partitionAssignments.get(partition);
         for (TaskBucket minTaskBucket : minTaskBuckets) {
-            double skewness =
-                    ((double) (estimatedTaskBucketDataSizeSinceLastRebalance[maxTaskBucket.id]
-                            - estimatedTaskBucketDataSizeSinceLastRebalance[minTaskBucket.id]))
-                            / estimatedTaskBucketDataSizeSinceLastRebalance[maxTaskBucket.id];
-            if (skewness <= TASK_BUCKET_SKEWNESS_THRESHOLD || isNaN(skewness)) {
+            if (!isSkewed(partitionDataSizeSinceLastRebalancePerTask[partition], estimatedTaskBucketDataSizeSinceLastRebalance[minTaskBucket.id])) {
                 break;
             }
-            if (maxTaskBucket.taskId != minTaskBucket.taskId) {
-                minSkewedTaskBuckets.add(minTaskBucket);
+            if (assignments.stream().noneMatch(taskBucket -> taskBucket.taskId == minTaskBucket.taskId)) {
+                return Optional.of(minTaskBucket);
             }
         }
+        return Optional.empty();
+    }
 
-        return minSkewedTaskBuckets.build();
+    private static boolean isSkewed(long dataSize, long minDataSize)
+    {
+        if (dataSize <= 0) {
+            return false;
+        }
+        return ((double) (dataSize - minDataSize)) / dataSize > TASK_BUCKET_SKEWNESS_THRESHOLD;
     }
 
     @GuardedBy("this")
-    private boolean rebalancePartition(
+    private void rebalancePartition(
             int partitionId,
             TaskBucket toTaskBucket,
             IndexedPriorityQueue<TaskBucket> maxTasks,
             IndexedPriorityQueue<TaskBucket> minTasks)
     {
         List<TaskBucket> assignments = partitionAssignments.get(partitionId);
-        if (assignments.stream().anyMatch(taskBucket -> taskBucket.taskId == toTaskBucket.taskId)) {
-            return false;
-        }
-
         assignments.add(toTaskBucket);
 
         int newTaskCount = assignments.size();
@@ -437,7 +439,6 @@ public class SkewedPartitionRebalancer
         }
 
         log.debug("Rebalanced partition %s to task %s with taskCount %s", partitionId, toTaskBucket.taskId, assignments.size());
-        return true;
     }
 
     private final class TaskBucket
