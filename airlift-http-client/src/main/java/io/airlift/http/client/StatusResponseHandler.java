@@ -1,0 +1,126 @@
+/*
+ * Copyright 2010 Proofpoint, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package io.airlift.http.client;
+
+import com.google.common.collect.ImmutableListMultimap;
+import com.google.common.collect.ListMultimap;
+import io.airlift.http.client.StatusResponseHandler.StatusResponse;
+import jakarta.annotation.Nullable;
+
+import java.util.List;
+import java.util.Optional;
+
+import static io.airlift.http.client.ResponseHandlerUtils.captureUnexpectedResponse;
+import static io.airlift.http.client.ResponseHandlerUtils.propagate;
+
+public class StatusResponseHandler
+        implements ResponseHandler<StatusResponse, RuntimeException>
+{
+    private static final StatusResponseHandler statusResponseHandler = new StatusResponseHandler(Optional.empty());
+
+    public static StatusResponseHandler createStatusResponseHandler()
+    {
+        return statusResponseHandler;
+    }
+
+    public static StatusResponseHandler createStatusResponseHandler(int firstSuccessfulResponseCode, int... otherSuccessfulResponseCodes)
+    {
+        return new StatusResponseHandler(Optional.of(SuccessfulResponseCodes.of(firstSuccessfulResponseCode, otherSuccessfulResponseCodes)));
+    }
+
+    public static StatusResponseHandler createSuccessfulStatusResponseHandler()
+    {
+        return new StatusResponseHandler(Optional.of(SuccessfulResponseCodes.anySuccessful()));
+    }
+
+    // empty when every response code is returned to the caller
+    private final Optional<SuccessfulResponseCodes> successfulResponseCodes;
+
+    private StatusResponseHandler(Optional<SuccessfulResponseCodes> successfulResponseCodes)
+    {
+        this.successfulResponseCodes = successfulResponseCodes;
+    }
+
+    @Override
+    public StatusResponse handleException(Request request, Exception exception)
+    {
+        throw propagate(request, exception);
+    }
+
+    @Override
+    public StatusResponse handle(Request request, Response response)
+    {
+        if (successfulResponseCodes.isPresent() && !successfulResponseCodes.orElseThrow().contains(response.getStatusCode())) {
+            throw captureUnexpectedResponse(
+                    "Expected response code to be %s, but was %d".formatted(successfulResponseCodes.orElseThrow(), response.getStatusCode()),
+                    request,
+                    response);
+        }
+        return new StatusResponse(response.getStatusCode(), response.getHeaders());
+    }
+
+    public static class StatusResponse
+    {
+        private final int statusCode;
+        private final ListMultimap<HeaderName, String> headers;
+
+        public StatusResponse(int statusCode, ListMultimap<HeaderName, String> headers)
+        {
+            this.statusCode = statusCode;
+            this.headers = ImmutableListMultimap.copyOf(headers);
+        }
+
+        public int getStatusCode()
+        {
+            return statusCode;
+        }
+
+        /**
+         * @deprecated Use {@link #getHeader(HeaderName)} instead
+         */
+        @Deprecated
+        @Nullable
+        public String getHeader(String name)
+        {
+            return getHeader(HeaderName.of(name)).orElse(null);
+        }
+
+        public Optional<String> getHeader(HeaderName name)
+        {
+            List<String> values = getHeaders().get(name);
+            return values.isEmpty() ? Optional.empty() : Optional.ofNullable(values.getFirst());
+        }
+
+        /**
+         * @deprecated Use {@link #getHeaders(HeaderName)} instead
+         */
+        @Deprecated
+        public List<String> getHeaders(String name)
+        {
+            return getHeaders(HeaderName.of(name));
+        }
+
+        public List<String> getHeaders(HeaderName name)
+        {
+            return headers.get(name);
+        }
+
+        public ListMultimap<HeaderName, String> getHeaders()
+        {
+            return headers;
+        }
+    }
+}
