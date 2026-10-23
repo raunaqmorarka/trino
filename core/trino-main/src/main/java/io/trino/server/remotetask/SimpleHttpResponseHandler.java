@@ -49,7 +49,7 @@ public class SimpleHttpResponseHandler<T>
                 callback.success(response.getValue());
             }
             else if (response.getStatusCode() == HttpStatus.SERVICE_UNAVAILABLE.code()) {
-                callback.failed(new ServiceUnavailableException(uri));
+                callback.failed(new RetryableResponseException(HttpStatus.SERVICE_UNAVAILABLE, uri));
             }
             else {
                 // Something is broken in the server or the client, so fail the task immediately (includes 500 errors)
@@ -84,14 +84,5 @@ public class SimpleHttpResponseHandler<T>
     {
         stats.updateFailure();
         callback.failed(t);
-    }
-
-    private static class ServiceUnavailableException
-            extends RuntimeException
-    {
-        public ServiceUnavailableException(URI uri)
-        {
-            super("Server returned SERVICE_UNAVAILABLE: " + uri);
-        }
     }
 }
