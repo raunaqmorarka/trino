@@ -1127,81 +1127,13 @@ public final class SortedRangeSet
     // visible for testing
     SortedRangeSet linearDiscreteSetUnion(SortedRangeSet that)
     {
-        return linearDiscreteSetUnion(this, that);
-    }
-
-    private SortedRangeSet linearDiscreteSetUnion(SortedRangeSet leftRangeSet, SortedRangeSet rightRangeSet)
-    {
-        int leftRangeCount = leftRangeSet.getRangeCount();
-        int rightRangeCount = rightRangeSet.getRangeCount();
-
-        boolean[] inclusive = new boolean[2 * (leftRangeCount + rightRangeCount)];
-        BlockBuilder blockBuilder = type.createBlockBuilder(null, 2 * (leftRangeCount + rightRangeCount));
-
-        int resultRangeIndex = 0;
-        int leftNextRangeIndex = 0;
-        int rightNextRangeIndex = 0;
-
-        int currentUnionStart = 0;
-
-        // The value at leftNextRangeIndex is guaranteed to be smaller than or equals to the value
-        // at the corresponding index on the right side. This is maintained by comparing and swapping.
-        // Due to this property, we can safely add all values from the left side up to
-        // leftNextRangeIndex in bulk, thus preserving sorted order.
-        MethodHandle comparisonOperator = getComparisonOperator();
-        while (leftNextRangeIndex < leftRangeCount && rightNextRangeIndex < rightRangeCount) {
-            int compare = compareValues(
-                    comparisonOperator,
-                    leftRangeSet.sortedRanges,
-                    2 * leftNextRangeIndex,
-                    rightRangeSet.sortedRanges,
-                    2 * rightNextRangeIndex);
-
-            if (compare == 0) {
-                leftNextRangeIndex++;
-                rightNextRangeIndex++;
-            }
-            else if (compare < 0) {
-                leftNextRangeIndex++;
-            }
-            else {
-                int size = leftNextRangeIndex - currentUnionStart;
-                copyBlock(leftRangeSet, currentUnionStart * 2, blockBuilder, inclusive, resultRangeIndex * 2, size);
-                resultRangeIndex += size;
-                currentUnionStart = rightNextRangeIndex;
-
-                // Swap leftRangeSet and rightRangeSet for continue consuming the lower value
-                SortedRangeSet tempSortedSet = leftRangeSet;
-                leftRangeSet = rightRangeSet;
-                rightRangeSet = tempSortedSet;
-
-                int tempNextIndex = leftNextRangeIndex;
-                leftNextRangeIndex = rightNextRangeIndex;
-                rightNextRangeIndex = tempNextIndex;
-
-                int tempRangeCount = leftRangeCount;
-                leftRangeCount = rightRangeCount;
-                rightRangeCount = tempRangeCount;
-            }
+        if (getRangeCount() == 0) {
+            return that;
         }
-
-        if (currentUnionStart < leftRangeCount) {
-            int size = leftRangeCount - currentUnionStart;
-            copyBlock(leftRangeSet, currentUnionStart * 2, blockBuilder, inclusive, resultRangeIndex * 2, size);
-            resultRangeIndex += size;
+        if (that.getRangeCount() == 0) {
+            return this;
         }
-
-        if (rightNextRangeIndex < rightRangeCount) {
-            int size = rightRangeCount - rightNextRangeIndex;
-            copyBlock(rightRangeSet, rightNextRangeIndex * 2, blockBuilder, inclusive, resultRangeIndex * 2, size);
-            resultRangeIndex += size;
-        }
-
-        if (resultRangeIndex * 2 < inclusive.length) {
-            inclusive = Arrays.copyOf(inclusive, resultRangeIndex * 2);
-        }
-
-        return new SortedRangeSet(type, inclusive, blockBuilder.build(), leftRangeSet.unionIsDiscreteSet(rightRangeSet, resultRangeIndex > 0));
+        return linearDiscreteSetUnion(List.of(this, that));
     }
 
     // Merges two or more non-empty discrete sets of the same type in one pass using a loser tree over the per-set cursors.

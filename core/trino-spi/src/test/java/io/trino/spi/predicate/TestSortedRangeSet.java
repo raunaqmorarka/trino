@@ -771,6 +771,11 @@ class TestSortedRangeSet
                 .linearDiscreteSetUnion(SortedRangeSet.of(BIGINT, 1L, 2L, 12L, 20L, 21L, 30L));
         assertThat(result).isEqualTo(SortedRangeSet.of(BIGINT, 1L, 2L, 10L, 11L, 12L, 20L, 21L, 30L));
         assertThat(result.isDiscreteSet()).isTrue();
+
+        SortedRangeSet single = SortedRangeSet.of(BIGINT, 1L);
+        assertThat(single.linearDiscreteSetUnion(SortedRangeSet.none(BIGINT))).isSameAs(single);
+        assertThat(SortedRangeSet.none(BIGINT).linearDiscreteSetUnion(single)).isSameAs(single);
+        assertThat(SortedRangeSet.none(BIGINT).linearDiscreteSetUnion(SortedRangeSet.none(BIGINT)).isNone()).isTrue();
     }
 
     @Test
