@@ -76,7 +76,7 @@ public final class BlockJsonSerde
         public Block deserialize(JsonParser parser, DeserializationContext context)
                 throws IOException
         {
-            byte[] decoded = Base64Variants.MIME_NO_LINEFEEDS.decode(context.readValue(parser, String.class));
+            byte[] decoded = parser.getBinaryValue(Base64Variants.MIME_NO_LINEFEEDS);
             return readBlock(blockEncodingSerde, Slices.wrappedBuffer(decoded));
         }
     }
