@@ -149,6 +149,8 @@ public class IcebergSplitSource
         implements ConnectorSplitSource
 {
     private static final Logger log = Logger.get(IcebergSplitSource.class);
+    // Iceberg treats IN predicates with more values than this as always matching when pruning manifests and files
+    private static final int ICEBERG_IN_PREDICATE_LIMIT = 200;
 
     private final IcebergFileSystemFactory fileSystemFactory;
     private final ConnectorSession session;
@@ -289,8 +291,10 @@ public class IcebergSplitSource
                 .transformKeys(IcebergColumnHandle.class::cast);
 
         if (fileScanIterable == null) {
+            // Value sets above the Iceberg limit are pushed down as their span and matched exactly in processFileScanTask
             this.pushedDownDynamicFilterPredicate = dynamicFilterPredicate
-                    .filter((columnHandle, domain) -> isConvertibleToIcebergExpression(domain) && !isMetadataColumnId(columnHandle.getId()));
+                    .filter((columnHandle, domain) -> isConvertibleToIcebergExpression(domain) && !isMetadataColumnId(columnHandle.getId()))
+                    .simplify(ICEBERG_IN_PREDICATE_LIMIT);
 
             TupleDomain<IcebergColumnHandle> effectivePredicate = TupleDomain.intersect(
                     ImmutableList.of(dataColumnPredicate, tableHandle.getUnenforcedPredicate(), pushedDownDynamicFilterPredicate));

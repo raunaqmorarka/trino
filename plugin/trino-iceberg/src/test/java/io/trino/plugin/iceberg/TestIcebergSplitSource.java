@@ -85,7 +85,9 @@ import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.LongStream;
 
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.Maps.transformValues;
 import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static com.google.common.util.concurrent.MoreExecutors.newDirectExecutorService;
@@ -186,6 +188,37 @@ public class TestIcebergSplitSource
                 ImmutableMap.of(
                         nationKey, Domain.create(ValueSet.ofRanges(Range.range(BIGINT, 0L, true, 24L, true)), false),
                         regionKey, Domain.create(ValueSet.ofRanges(Range.range(BIGINT, 0L, true, 4L, true)), false))));
+    }
+
+    @Test
+    public void testLargeDynamicFilterValueSetPruning()
+            throws Exception
+    {
+        SchemaTableName schemaTableName = new SchemaTableName("tpch", "nation");
+        Table nationTable = catalog.loadTable(SESSION, schemaTableName);
+        IcebergTableHandle tableHandle = createTableHandle(schemaTableName, nationTable, TupleDomain.all());
+        IcebergColumnHandle nationKey = IcebergColumnHandle.optional(new ColumnIdentity(1, "nationkey", ColumnIdentity.TypeCategory.PRIMITIVE, ImmutableList.of()))
+                .columnType(BIGINT)
+                .build();
+
+        // value set covering the file's nationkey range keeps the file
+        assertThat(generateSplits(nationTable, tableHandle, nationKey, multipleValues(LongStream.rangeClosed(0, 300)))).hasSize(1);
+        // value set whose span misses the file's nationkey range prunes the file
+        assertThat(generateSplits(nationTable, tableHandle, nationKey, multipleValues(LongStream.rangeClosed(100, 400)))).isEmpty();
+        // value set whose span overlaps the file but whose values miss it prunes the file
+        assertThat(generateSplits(nationTable, tableHandle, nationKey, multipleValues(LongStream.concat(LongStream.rangeClosed(-300, -1), LongStream.rangeClosed(30, 330))))).isEmpty();
+    }
+
+    private static Domain multipleValues(LongStream values)
+    {
+        return Domain.multipleValues(BIGINT, values.boxed().collect(toImmutableList()));
+    }
+
+    private List<IcebergSplit> generateSplits(Table nationTable, IcebergTableHandle tableHandle, IcebergColumnHandle column, Domain dynamicFilterDomain)
+            throws Exception
+    {
+        TupleDomain<ColumnHandle> dynamicFilterPredicate = TupleDomain.<ColumnHandle>withColumnDomains(ImmutableMap.of(column, dynamicFilterDomain));
+        return generateSplits(SESSION, nationTable, tableHandle, ImmutableSet.of(column), new DynamicFilterSnapshot(dynamicFilterPredicate, true));
     }
 
     @Test
