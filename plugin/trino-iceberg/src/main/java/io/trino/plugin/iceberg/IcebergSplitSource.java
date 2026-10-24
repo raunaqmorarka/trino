@@ -97,6 +97,7 @@ import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Supplier;
+import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import static com.google.common.base.Preconditions.checkArgument;
@@ -123,8 +124,6 @@ import static io.trino.plugin.iceberg.IcebergUtil.getFileModifiedTimeDomain;
 import static io.trino.plugin.iceberg.IcebergUtil.getFileScanPartitionSpec;
 import static io.trino.plugin.iceberg.IcebergUtil.getModificationTime;
 import static io.trino.plugin.iceberg.IcebergUtil.getPartitionDomain;
-import static io.trino.plugin.iceberg.IcebergUtil.getPartitionKeys;
-import static io.trino.plugin.iceberg.IcebergUtil.getPartitionValues;
 import static io.trino.plugin.iceberg.IcebergUtil.getPathDomain;
 import static io.trino.plugin.iceberg.IcebergUtil.primitiveFieldTypes;
 import static io.trino.plugin.iceberg.StructLikeWrapperWithFieldIdToIndex.createStructLikeWrapper;
@@ -490,9 +489,7 @@ public class IcebergSplitSource
         }
 
         Set<IcebergColumnHandle> identityPartitionColumns = specContext.identityPartitionColumns();
-        Supplier<Map<ColumnHandle, NullableValue>> partitionValues = memoize(() -> getPartitionValues(
-                identityPartitionColumns,
-                getPartitionKeys(fileScanTask.partition(), partitionSpec)));
+        Supplier<Map<ColumnHandle, NullableValue>> partitionValues = memoize(() -> identityPartitionValues(fileScanTask.partition(), specContext.identityPartitionFields()));
 
         if (dynamicFilterContext.needsPruning() && !partitionMatchesPredicate(identityPartitionColumns, partitionValues, dynamicFilterContext.predicate())) {
             return true;
@@ -529,6 +526,7 @@ public class IcebergSplitSource
     // split source state derived once per partition spec and shared by every file written with it
     private record PartitionSpecContext(
             PartitionSpec spec,
+            List<IdentityPartitionField> identityPartitionFields,
             Set<IcebergColumnHandle> identityPartitionColumns,
             boolean onlyIdentityPartitionColumnsProjected,
             List<IcebergColumnHandle> predicatedColumns,
@@ -538,11 +536,49 @@ public class IcebergSplitSource
         private PartitionSpecContext
         {
             requireNonNull(spec, "spec is null");
+            requireNonNull(identityPartitionFields, "identityPartitionFields is null");
             requireNonNull(identityPartitionColumns, "identityPartitionColumns is null");
             requireNonNull(predicatedColumns, "predicatedColumns is null");
             requireNonNull(partitionFieldTypes, "partitionFieldTypes is null");
             requireNonNull(partitionBlockTypes, "partitionBlockTypes is null");
         }
+    }
+
+    // identity partition field of a spec with its position in the partition tuple
+    record IdentityPartitionField(int position, Type icebergType, IcebergColumnHandle column)
+    {
+        IdentityPartitionField
+        {
+            requireNonNull(icebergType, "icebergType is null");
+            requireNonNull(column, "column is null");
+        }
+    }
+
+    @VisibleForTesting
+    static List<IdentityPartitionField> identityPartitionFields(PartitionSpec spec, TypeManager typeManager)
+    {
+        Schema schema = spec.schema();
+        List<PartitionField> fields = spec.fields();
+        return IntStream.range(0, fields.size())
+                .filter(position -> fields.get(position).transform().isIdentity())
+                .mapToObj(position -> new IdentityPartitionField(
+                        position,
+                        schema.findType(fields.get(position).sourceId()),
+                        getColumnHandle(schema.findField(fields.get(position).sourceId()), typeManager)))
+                .collect(toImmutableList());
+    }
+
+    // converts the identity partition values of one file directly from the manifest representation
+    @VisibleForTesting
+    static Map<ColumnHandle, NullableValue> identityPartitionValues(StructLike partition, List<IdentityPartitionField> identityPartitionFields)
+    {
+        ImmutableMap.Builder<ColumnHandle, NullableValue> partitionValues = ImmutableMap.builderWithExpectedSize(identityPartitionFields.size());
+        for (IdentityPartitionField field : identityPartitionFields) {
+            Type icebergType = field.icebergType();
+            Object value = convertIcebergValueToTrino(icebergType, partition.get(field.position(), icebergType.typeId().javaClass()));
+            partitionValues.put(field.column(), new NullableValue(field.column().getType(), value));
+        }
+        return partitionValues.buildOrThrow();
     }
 
     private synchronized PartitionSpecContext getPartitionSpecContext(FileScanTask fileScanTask)
@@ -559,9 +595,9 @@ public class IcebergSplitSource
     private PartitionSpecContext createPartitionSpecContext(PartitionSpec spec)
     {
         Schema schema = spec.schema();
-        Set<IcebergColumnHandle> identityPartitionColumns = spec.fields().stream()
-                .filter(field -> field.transform().isIdentity())
-                .map(field -> getColumnHandle(schema.findField(field.sourceId()), typeManager))
+        List<IdentityPartitionField> identityPartitionFields = identityPartitionFields(spec, typeManager);
+        Set<IcebergColumnHandle> identityPartitionColumns = identityPartitionFields.stream()
+                .map(IdentityPartitionField::column)
                 .collect(toImmutableSet());
         boolean onlyIdentityPartitionColumnsProjected = spec.fields().stream()
                 .filter(field -> field.transform().isIdentity())
@@ -578,7 +614,7 @@ public class IcebergSplitSource
         List<io.trino.spi.type.Type> partitionBlockTypes = partitionFieldTypes.stream()
                 .map(type -> toTrinoType(type, typeManager))
                 .collect(toImmutableList());
-        return new PartitionSpecContext(spec, identityPartitionColumns, onlyIdentityPartitionColumnsProjected, predicatedColumns, partitionFieldTypes, partitionBlockTypes);
+        return new PartitionSpecContext(spec, identityPartitionFields, identityPartitionColumns, onlyIdentityPartitionColumnsProjected, predicatedColumns, partitionFieldTypes, partitionBlockTypes);
     }
 
     private synchronized void finish()

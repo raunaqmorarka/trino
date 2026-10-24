@@ -193,7 +193,7 @@ public final class IcebergTypes
             }
             return utf8Slice(((String) value));
         }
-        if (icebergType instanceof Types.BinaryType) {
+        if (icebergType instanceof Types.BinaryType || icebergType instanceof Types.FixedType) {
             return Slices.wrappedBuffer(getWrappedBytes((ByteBuffer) value).clone());
         }
         if (icebergType instanceof Types.DateType) {

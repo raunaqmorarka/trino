@@ -16,6 +16,7 @@ package io.trino.plugin.iceberg;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import io.airlift.slice.Slices;
 import io.trino.filesystem.TrinoFileSystemFactory;
 import io.trino.filesystem.cache.NoopSplitAffinityProvider;
 import io.trino.metastore.HiveMetastore;
@@ -50,7 +51,9 @@ import io.trino.testing.sql.TestTable;
 import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.PartitionSpecParser;
+import org.apache.iceberg.Schema;
 import org.apache.iceberg.SchemaParser;
+import org.apache.iceberg.StructLike;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableProperties;
 import org.apache.iceberg.deletes.PositionDelete;
@@ -77,6 +80,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 
 import java.io.Closeable;
+import java.math.BigDecimal;
 import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.Map;
@@ -93,14 +97,21 @@ import static com.google.common.util.concurrent.MoreExecutors.directExecutor;
 import static com.google.common.util.concurrent.MoreExecutors.newDirectExecutorService;
 import static io.trino.metastore.cache.CachingHiveMetastore.createPerTransactionCache;
 import static io.trino.plugin.iceberg.IcebergSplitSource.createFileStatisticsDomain;
+import static io.trino.plugin.iceberg.IcebergSplitSource.identityPartitionFields;
+import static io.trino.plugin.iceberg.IcebergSplitSource.identityPartitionValues;
 import static io.trino.plugin.iceberg.IcebergSplitSource.parquetFileDecryptionData;
 import static io.trino.plugin.iceberg.IcebergTestUtils.FILE_IO_FACTORY;
 import static io.trino.plugin.iceberg.IcebergTestUtils.getFileSystemFactory;
 import static io.trino.plugin.iceberg.IcebergTestUtils.getHiveMetastore;
 import static io.trino.plugin.iceberg.IcebergTestUtils.withSmallRowGroups;
+import static io.trino.plugin.iceberg.IcebergUtil.getColumnHandle;
 import static io.trino.plugin.iceberg.util.EqualityDeleteUtils.writeEqualityDeleteForTable;
 import static io.trino.spi.connector.Constraint.alwaysTrue;
 import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.DateType.DATE;
+import static io.trino.spi.type.DecimalType.createDecimalType;
+import static io.trino.spi.type.VarbinaryType.VARBINARY;
+import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.tpch.TpchTable.NATION;
 import static io.trino.type.InternalTypeManager.TESTING_TYPE_MANAGER;
 import static org.apache.iceberg.TableProperties.ENCRYPTION_TABLE_KEY;
@@ -239,6 +250,45 @@ public class TestIcebergSplitSource
                 ImmutableSet.of(bigintColumn),
                 () -> ImmutableMap.of(bigintColumn, NullableValue.of(BIGINT, 1000L)),
                 TupleDomain.fromFixedValues(ImmutableMap.of(bigintColumn, NullableValue.asNull(BIGINT))))).isFalse();
+    }
+
+    @Test
+    public void testIdentityPartitionValues()
+    {
+        Schema schema = new Schema(
+                Types.NestedField.required(1, "id", Types.LongType.get()),
+                Types.NestedField.optional(2, "name", Types.StringType.get()),
+                Types.NestedField.optional(3, "day", Types.DateType.get()),
+                Types.NestedField.optional(4, "price", Types.DecimalType.of(10, 2)),
+                Types.NestedField.optional(5, "data", Types.BinaryType.get()),
+                Types.NestedField.optional(6, "code", Types.FixedType.ofLength(2)));
+        PartitionSpec spec = PartitionSpec.builderFor(schema)
+                .identity("id")
+                .bucket("name", 4)
+                .identity("day")
+                .identity("price")
+                .identity("data")
+                .identity("code")
+                .identity("name")
+                .build();
+        StructLike partition = new PartitionData(new Object[] {
+                42L,
+                3,
+                19000,
+                new BigDecimal("12.34"),
+                ByteBuffer.wrap(new byte[] {1, 2, 3}),
+                ByteBuffer.wrap(new byte[] {4, 5}),
+                null,
+        });
+
+        assertThat(identityPartitionValues(partition, identityPartitionFields(spec, TESTING_TYPE_MANAGER)))
+                .isEqualTo(ImmutableMap.of(
+                        getColumnHandle(schema.findField("id"), TESTING_TYPE_MANAGER), NullableValue.of(BIGINT, 42L),
+                        getColumnHandle(schema.findField("day"), TESTING_TYPE_MANAGER), NullableValue.of(DATE, 19000L),
+                        getColumnHandle(schema.findField("price"), TESTING_TYPE_MANAGER), NullableValue.of(createDecimalType(10, 2), 1234L),
+                        getColumnHandle(schema.findField("data"), TESTING_TYPE_MANAGER), NullableValue.of(VARBINARY, Slices.wrappedBuffer(new byte[] {1, 2, 3})),
+                        getColumnHandle(schema.findField("code"), TESTING_TYPE_MANAGER), NullableValue.of(VARBINARY, Slices.wrappedBuffer(new byte[] {4, 5})),
+                        getColumnHandle(schema.findField("name"), TESTING_TYPE_MANAGER), NullableValue.asNull(VARCHAR)));
     }
 
     @Test
