@@ -338,6 +338,11 @@ public class IcebergSplitSource
             finish();
             return ImmutableList.of();
         }
+        DynamicFilterContext dynamicFilterContext = new DynamicFilterContext(
+                dynamicFilterPredicate,
+                pathDomain.intersect(getPathDomain(dynamicFilterPredicate)),
+                fileModifiedTimeDomain.intersect(getFileModifiedTimeDomain(dynamicFilterPredicate)),
+                needsDynamicFilterPruning(dynamicFilterPredicate));
 
         List<ConnectorSplit> splits = new ArrayList<>(maxSize);
         while (splits.size() < maxSize && (fileTasksIterator.hasNext() || fileScanIterator.hasNext())) {
@@ -347,7 +352,7 @@ public class IcebergSplitSource
                     break;
                 }
 
-                List<FileScanTaskWithContext> fileScanTasks = processFileScanTask(dynamicFilterPredicate);
+                List<FileScanTaskWithContext> fileScanTasks = processFileScanTask(dynamicFilterContext);
                 if (fileScanTasks.isEmpty()) {
                     continue;
                 }
@@ -412,15 +417,15 @@ public class IcebergSplitSource
         return pathDomain.isAll() && fileModifiedTimeDomain.isAll();
     }
 
-    private synchronized List<FileScanTaskWithContext> processFileScanTask(TupleDomain<IcebergColumnHandle> dynamicFilterPredicate)
+    private synchronized List<FileScanTaskWithContext> processFileScanTask(DynamicFilterContext dynamicFilterContext)
     {
         FileScanTask wholeFileTask = fileScanIterator.next();
         boolean fileHasNoDeletions = wholeFileTask.deletes().isEmpty();
-        if (pruneFileScanTask(wholeFileTask, fileHasNoDeletions, dynamicFilterPredicate)) {
+        if (pruneFileScanTask(wholeFileTask, fileHasNoDeletions, dynamicFilterContext)) {
             return ImmutableList.of();
         }
         FileScanTaskWithContext fileScanTaskWithDomain = createFileScanTaskWithContext(wholeFileTask);
-        if (needsDynamicFilterPruning(dynamicFilterPredicate) && !fileScanTaskWithDomain.fileStatisticsDomain().overlaps(dynamicFilterPredicate)) {
+        if (dynamicFilterContext.needsPruning() && !fileScanTaskWithDomain.fileStatisticsDomain().overlaps(dynamicFilterContext.predicate())) {
             return ImmutableList.of();
         }
 
@@ -459,7 +464,7 @@ public class IcebergSplitSource
         return ImmutableList.of(fileScanTaskWithDomain);
     }
 
-    private synchronized boolean pruneFileScanTask(FileScanTask wholeFileTask, boolean fileHasNoDeletions, TupleDomain<IcebergColumnHandle> dynamicFilterPredicate)
+    private synchronized boolean pruneFileScanTask(FileScanTask wholeFileTask, boolean fileHasNoDeletions, DynamicFilterContext dynamicFilterContext)
     {
         BaseFileScanTask fileScanTask = (BaseFileScanTask) wholeFileTask;
         if (fileHasNoDeletions &&
@@ -475,11 +480,11 @@ public class IcebergSplitSource
                 return true;
             }
         }
-        Domain fullPathDomain = pathDomain.intersect(getPathDomain(dynamicFilterPredicate));
+        Domain fullPathDomain = dynamicFilterContext.fullPathDomain();
         if (!fullPathDomain.isAll() && !fullPathDomain.includesNullableValue(utf8Slice(fileScanTask.file().location()))) {
             return true;
         }
-        Domain fullFileModifiedTimeDomain = fileModifiedTimeDomain.intersect(getFileModifiedTimeDomain(dynamicFilterPredicate));
+        Domain fullFileModifiedTimeDomain = dynamicFilterContext.fullFileModifiedTimeDomain();
         if (!fullFileModifiedTimeDomain.isAll()) {
             long fileModifiedTime = getModificationTime(fileScanTask.file().location(), fileSystemFactory.create(session.getIdentity(), tableCredentials));
             if (!fullFileModifiedTimeDomain.includesNullableValue(packDateTimeWithZone(fileModifiedTime, UTC_KEY))) {
@@ -496,11 +501,26 @@ public class IcebergSplitSource
 
         Supplier<Map<ColumnHandle, NullableValue>> partitionValues = memoize(() -> getPartitionValues(identityPartitionColumns, partitionKeys));
 
-        if (needsDynamicFilterPruning(dynamicFilterPredicate) && !partitionMatchesPredicate(identityPartitionColumns, partitionValues, dynamicFilterPredicate)) {
+        if (dynamicFilterContext.needsPruning() && !partitionMatchesPredicate(identityPartitionColumns, partitionValues, dynamicFilterContext.predicate())) {
             return true;
         }
 
         return !partitionConstraintMatcher.matches(identityPartitionColumns, partitionValues);
+    }
+
+    // dynamic filter state shared by every file of one batch
+    private record DynamicFilterContext(
+            TupleDomain<IcebergColumnHandle> predicate,
+            Domain fullPathDomain,
+            Domain fullFileModifiedTimeDomain,
+            boolean needsPruning)
+    {
+        private DynamicFilterContext
+        {
+            requireNonNull(predicate, "predicate is null");
+            requireNonNull(fullPathDomain, "fullPathDomain is null");
+            requireNonNull(fullFileModifiedTimeDomain, "fullFileModifiedTimeDomain is null");
+        }
     }
 
     private synchronized boolean needsDynamicFilterPruning(TupleDomain<IcebergColumnHandle> dynamicFilterPredicate)
