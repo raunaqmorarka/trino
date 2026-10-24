@@ -58,7 +58,6 @@ import io.trino.spi.predicate.TupleDomain;
 import io.trino.spi.predicate.ValueSet;
 import io.trino.spi.type.TypeManager;
 import jakarta.annotation.Nullable;
-import org.apache.iceberg.BaseFileScanTask;
 import org.apache.iceberg.CombinedScanTask;
 import org.apache.iceberg.ContentFile;
 import org.apache.iceberg.FileFormat;
@@ -191,11 +190,9 @@ public class IcebergSplitSource
     private CloseableIterator<FileScanTask> fileScanIterator;
     @GuardedBy("this")
     private Iterator<FileScanTaskWithContext> fileTasksIterator = emptyIterator();
-    // column handles for predicatedColumnIds, rebuilt only when the file schema changes
+    // per-spec state keyed by spec id, derived on first use and bounded by specsById
     @GuardedBy("this")
-    private Schema predicatedColumnsSchema;
-    @GuardedBy("this")
-    private List<IcebergColumnHandle> predicatedColumns = ImmutableList.of();
+    private final Map<Integer, PartitionSpecContext> partitionSpecContexts = new HashMap<>();
 
     private final boolean recordScannedFiles;
     private final Map<Integer, PartitionSpec> specsById;
@@ -420,11 +417,12 @@ public class IcebergSplitSource
     private synchronized List<FileScanTaskWithContext> processFileScanTask(DynamicFilterContext dynamicFilterContext)
     {
         FileScanTask wholeFileTask = fileScanIterator.next();
+        PartitionSpecContext specContext = getPartitionSpecContext(wholeFileTask);
         boolean fileHasNoDeletions = wholeFileTask.deletes().isEmpty();
-        if (pruneFileScanTask(wholeFileTask, fileHasNoDeletions, dynamicFilterContext)) {
+        if (pruneFileScanTask(wholeFileTask, specContext, fileHasNoDeletions, dynamicFilterContext)) {
             return ImmutableList.of();
         }
-        FileScanTaskWithContext fileScanTaskWithDomain = createFileScanTaskWithContext(wholeFileTask);
+        FileScanTaskWithContext fileScanTaskWithDomain = createFileScanTaskWithContext(wholeFileTask, specContext);
         if (dynamicFilterContext.needsPruning() && !fileScanTaskWithDomain.fileStatisticsDomain().overlaps(dynamicFilterContext.predicate())) {
             return ImmutableList.of();
         }
@@ -436,7 +434,7 @@ public class IcebergSplitSource
         // Assess if the partition that wholeFileTask belongs to should be included for OPTIMIZE
         // If file was partitioned under an old spec, OPTIMIZE may be able to merge it with another file under new partitioning spec
         // We don't know which partition of new spec this file belongs to, so we include all files in OPTIMIZE
-        PartitionSpec spec = getFileScanPartitionSpec(wholeFileTask, specsById);
+        PartitionSpec spec = specContext.spec();
         if (currentSpecId != spec.specId()) {
             Stream<FileScanTaskWithContext> allQueuedTasks = scannedFilesByPartition.values().stream()
                     .filter(Optional::isPresent)
@@ -464,16 +462,15 @@ public class IcebergSplitSource
         return ImmutableList.of(fileScanTaskWithDomain);
     }
 
-    private synchronized boolean pruneFileScanTask(FileScanTask wholeFileTask, boolean fileHasNoDeletions, DynamicFilterContext dynamicFilterContext)
+    private synchronized boolean pruneFileScanTask(FileScanTask fileScanTask, PartitionSpecContext specContext, boolean fileHasNoDeletions, DynamicFilterContext dynamicFilterContext)
     {
-        BaseFileScanTask fileScanTask = (BaseFileScanTask) wholeFileTask;
         if (fileHasNoDeletions &&
                 maxScannedFileSizeInBytes.isPresent() &&
                 fileScanTask.file().fileSizeInBytes() > maxScannedFileSizeInBytes.orElseThrow()) {
             return true;
         }
 
-        PartitionSpec partitionSpec = getFileScanPartitionSpec(fileScanTask, specsById);
+        PartitionSpec partitionSpec = specContext.spec();
         if (!partitionDomain.isAll()) {
             String partition = partitionSpec.partitionToPath(fileScanTask.partition());
             if (!partitionDomain.includesNullableValue(utf8Slice(partition))) {
@@ -492,14 +489,10 @@ public class IcebergSplitSource
             }
         }
 
-        Schema fileSchema = fileScanTask.schema();
-        Map<Integer, Optional<String>> partitionKeys = getPartitionKeys(fileScanTask.partition(), partitionSpec);
-
-        Set<IcebergColumnHandle> identityPartitionColumns = partitionKeys.keySet().stream()
-                .map(fieldId -> getColumnHandle(fileSchema.findField(fieldId), typeManager))
-                .collect(toImmutableSet());
-
-        Supplier<Map<ColumnHandle, NullableValue>> partitionValues = memoize(() -> getPartitionValues(identityPartitionColumns, partitionKeys));
+        Set<IcebergColumnHandle> identityPartitionColumns = specContext.identityPartitionColumns();
+        Supplier<Map<ColumnHandle, NullableValue>> partitionValues = memoize(() -> getPartitionValues(
+                identityPartitionColumns,
+                getPartitionKeys(fileScanTask.partition(), partitionSpec)));
 
         if (dynamicFilterContext.needsPruning() && !partitionMatchesPredicate(identityPartitionColumns, partitionValues, dynamicFilterContext.predicate())) {
             return true;
@@ -528,13 +521,64 @@ public class IcebergSplitSource
         return !dynamicFilterPredicate.isAll() && !dynamicFilterPredicate.equals(pushedDownDynamicFilterPredicate);
     }
 
-    private boolean noDataColumnsProjected(FileScanTask fileScanTask)
+    private synchronized boolean noDataColumnsProjected(FileScanTask fileScanTask)
     {
-        return getFileScanPartitionSpec(fileScanTask, specsById).fields().stream()
-                .filter(partitionField -> partitionField.transform().isIdentity())
+        return getPartitionSpecContext(fileScanTask).onlyIdentityPartitionColumnsProjected();
+    }
+
+    // split source state derived once per partition spec and shared by every file written with it
+    private record PartitionSpecContext(
+            PartitionSpec spec,
+            Set<IcebergColumnHandle> identityPartitionColumns,
+            boolean onlyIdentityPartitionColumnsProjected,
+            List<IcebergColumnHandle> predicatedColumns,
+            List<Type> partitionFieldTypes,
+            List<io.trino.spi.type.Type> partitionBlockTypes)
+    {
+        private PartitionSpecContext
+        {
+            requireNonNull(spec, "spec is null");
+            requireNonNull(identityPartitionColumns, "identityPartitionColumns is null");
+            requireNonNull(predicatedColumns, "predicatedColumns is null");
+            requireNonNull(partitionFieldTypes, "partitionFieldTypes is null");
+            requireNonNull(partitionBlockTypes, "partitionBlockTypes is null");
+        }
+    }
+
+    private synchronized PartitionSpecContext getPartitionSpecContext(FileScanTask fileScanTask)
+    {
+        int specId = fileScanTask.file().specId();
+        PartitionSpecContext specContext = partitionSpecContexts.get(specId);
+        if (specContext == null) {
+            specContext = createPartitionSpecContext(getFileScanPartitionSpec(fileScanTask, specsById));
+            partitionSpecContexts.put(specId, specContext);
+        }
+        return specContext;
+    }
+
+    private PartitionSpecContext createPartitionSpecContext(PartitionSpec spec)
+    {
+        Schema schema = spec.schema();
+        Set<IcebergColumnHandle> identityPartitionColumns = spec.fields().stream()
+                .filter(field -> field.transform().isIdentity())
+                .map(field -> getColumnHandle(schema.findField(field.sourceId()), typeManager))
+                .collect(toImmutableSet());
+        boolean onlyIdentityPartitionColumnsProjected = spec.fields().stream()
+                .filter(field -> field.transform().isIdentity())
                 .map(PartitionField::sourceId)
                 .collect(toImmutableSet())
                 .containsAll(projectedBaseColumns);
+        List<IcebergColumnHandle> predicatedColumns = schema.columns().stream()
+                .filter(column -> predicatedColumnIds.contains(column.fieldId()))
+                .map(column -> getColumnHandle(column, typeManager))
+                .collect(toImmutableList());
+        List<Type> partitionFieldTypes = spec.fields().stream()
+                .map(field -> spec.partitionType().field(field.fieldId()).type())
+                .collect(toImmutableList());
+        List<io.trino.spi.type.Type> partitionBlockTypes = partitionFieldTypes.stream()
+                .map(type -> toTrinoType(type, typeManager))
+                .collect(toImmutableList());
+        return new PartitionSpecContext(spec, identityPartitionColumns, onlyIdentityPartitionColumnsProjected, predicatedColumns, partitionFieldTypes, partitionBlockTypes);
     }
 
     private synchronized void finish()
@@ -631,21 +675,8 @@ public class IcebergSplitSource
         }
     }
 
-    private synchronized List<IcebergColumnHandle> getPredicatedColumns(Schema schema)
+    private FileScanTaskWithContext createFileScanTaskWithContext(FileScanTask wholeFileTask, PartitionSpecContext specContext)
     {
-        if (schema != predicatedColumnsSchema) {
-            predicatedColumns = schema.columns().stream()
-                    .filter(column -> predicatedColumnIds.contains(column.fieldId()))
-                    .map(column -> getColumnHandle(column, typeManager))
-                    .collect(toImmutableList());
-            predicatedColumnsSchema = schema;
-        }
-        return predicatedColumns;
-    }
-
-    private FileScanTaskWithContext createFileScanTaskWithContext(FileScanTask wholeFileTask)
-    {
-        List<IcebergColumnHandle> predicatedColumns = getPredicatedColumns(wholeFileTask.schema());
         List<DeleteFile> deleteFiles = wholeFileTask.deletes().stream()
                 .peek(file -> verifyDeletionVectorReferencesDataFile(wholeFileTask, file))
                 .map(file -> DeleteFile.fromIceberg(file, parquetFileDecryptionData(
@@ -663,7 +694,7 @@ public class IcebergSplitSource
                         wholeFileTask.file().lowerBounds(),
                         wholeFileTask.file().upperBounds(),
                         wholeFileTask.file().nullValueCounts(),
-                        predicatedColumns),
+                        specContext.predicatedColumns()),
                 parquetFileDecryptionData(
                         wholeFileTask.file().format(),
                         wholeFileTask.file().location(),
@@ -894,7 +925,7 @@ public class IcebergSplitSource
     private IcebergSplit toIcebergSplit(FileScanTaskWithContext taskWithDomain)
     {
         FileScanTask task = taskWithDomain.fileScanTask();
-        PartitionSpec partitionSpec = getFileScanPartitionSpec(task, specsById);
+        PartitionSpecContext specContext = getPartitionSpecContext(task);
 
         Optional<String> affinityKey = splitAffinityProvider.getKey(task.file().location(), task.start(), task.length());
         return new IcebergSplit(
@@ -904,8 +935,8 @@ public class IcebergSplitSource
                 task.file().fileSizeInBytes(),
                 task.file().recordCount(),
                 IcebergFileFormat.fromIceberg(task.file().format()),
-                partitionSpec.specId(),
-                getPartitionBlockValues(task, partitionSpec, typeManager),
+                specContext.spec().specId(),
+                getPartitionBlockValues(task.file().partition(), specContext),
                 taskWithDomain.deleteFiles(),
                 SplitWeight.fromProportion(clamp(getSplitWeight(task), minimumAssignedSplitWeight, 1.0)),
                 taskWithDomain.fileStatisticsDomain(),
@@ -915,16 +946,15 @@ public class IcebergSplitSource
                 taskWithDomain.parquetFileDecryptionData());
     }
 
-    private static List<Block> getPartitionBlockValues(FileScanTask task, PartitionSpec spec, TypeManager typeManager)
+    private static List<Block> getPartitionBlockValues(StructLike partition, PartitionSpecContext specContext)
     {
-        StructLike partition = task.file().partition();
-        List<PartitionField> fields = spec.fields();
+        List<Type> partitionFieldTypes = specContext.partitionFieldTypes();
+        List<io.trino.spi.type.Type> partitionBlockTypes = specContext.partitionBlockTypes();
 
-        ImmutableList.Builder<Block> partitionValues = ImmutableList.builder();
-        for (int fieldIndex = 0; fieldIndex < fields.size(); fieldIndex++) {
-            Type icebergType = spec.partitionType().field(fields.get(fieldIndex).fieldId()).type();
-            Object partitionValue = convertIcebergValueToTrino(icebergType, partition.get(fieldIndex, Object.class));
-            partitionValues.add(writeNativeValue(toTrinoType(icebergType, typeManager), partitionValue));
+        ImmutableList.Builder<Block> partitionValues = ImmutableList.builderWithExpectedSize(partitionFieldTypes.size());
+        for (int fieldIndex = 0; fieldIndex < partitionFieldTypes.size(); fieldIndex++) {
+            Object partitionValue = convertIcebergValueToTrino(partitionFieldTypes.get(fieldIndex), partition.get(fieldIndex, Object.class));
+            partitionValues.add(writeNativeValue(partitionBlockTypes.get(fieldIndex), partitionValue));
         }
         return partitionValues.build();
     }
