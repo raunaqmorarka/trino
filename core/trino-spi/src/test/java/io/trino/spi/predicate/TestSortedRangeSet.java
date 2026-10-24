@@ -906,6 +906,21 @@ class TestSortedRangeSet
 
         set = SortedRangeSet.of(Range.equal(BOOLEAN, true), Range.equal(BOOLEAN, false));
         assertThat(set).isEqualTo(mapper.readValue(mapper.writeValueAsString(set), SortedRangeSet.class));
+
+        set = SortedRangeSet.of(BIGINT, 1L, 2L, 3L);
+        String json = mapper.writeValueAsString(set);
+        assertThat(json).doesNotContain("inclusive");
+        assertThat(mapper.readValue(json, SortedRangeSet.class)).isEqualTo(set);
+
+        set = SortedRangeSet.of(Range.range(BIGINT, 1L, true, 5L, true), Range.greaterThan(BIGINT, 10L));
+        json = mapper.writeValueAsString(set);
+        assertThat(json).contains("\"inclusive\":[true,true,false,false]");
+        assertThat(mapper.readValue(json, SortedRangeSet.class)).isEqualTo(set);
+
+        set = SortedRangeSet.of(Range.range(BIGINT, 1L, true, 5L, true), Range.range(BIGINT, 10L, true, 20L, true));
+        json = mapper.writeValueAsString(set);
+        assertThat(json).doesNotContain("inclusive");
+        assertThat(mapper.readValue(json, SortedRangeSet.class)).isEqualTo(set);
     }
 
     @Test

@@ -22,6 +22,7 @@ import io.trino.spi.block.DictionaryBlock;
 import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.block.ValueBlock;
 import io.trino.spi.type.Type;
+import jakarta.annotation.Nullable;
 
 import java.lang.invoke.MethodHandle;
 import java.util.ArrayList;
@@ -159,14 +160,23 @@ public final class SortedRangeSet
     @Deprecated // Discourage usages in SPI consumers
     public static SortedRangeSet fromJson(
             @JsonProperty("type") Type type,
-            @JsonProperty("inclusive") boolean[] inclusive,
+            @JsonProperty("inclusive") @Nullable boolean[] inclusive,
             @JsonProperty("sortedRanges") Block sortedRanges,
             @JsonProperty("discreteSetMarker") DiscreteSetMarker discreteSetMarker)
     {
         if (sortedRanges instanceof BlockBuilder) {
             throw new IllegalArgumentException("sortedRanges must be a block: " + sortedRanges);
         }
-        return new SortedRangeSet(type, inclusive.clone(), sortedRanges, discreteSetMarker);
+        boolean[] inclusiveMarkers;
+        if (inclusive == null) {
+            // absent markers mean every bound is inclusive
+            inclusiveMarkers = new boolean[sortedRanges.getPositionCount()];
+            Arrays.fill(inclusiveMarkers, true);
+        }
+        else {
+            inclusiveMarkers = inclusive.clone();
+        }
+        return new SortedRangeSet(type, inclusiveMarkers, sortedRanges, discreteSetMarker);
     }
 
     /**
@@ -301,10 +311,22 @@ public final class SortedRangeSet
         return type;
     }
 
-    @JsonProperty
     public boolean[] getInclusive()
     {
         return inclusive;
+    }
+
+    // Used for serialization purpose only; null when every bound is inclusive, which covers every discrete set
+    @Nullable
+    @JsonProperty("inclusive")
+    public boolean[] getInclusiveForJson()
+    {
+        for (boolean marker : inclusive) {
+            if (!marker) {
+                return inclusive;
+            }
+        }
+        return null;
     }
 
     @JsonProperty

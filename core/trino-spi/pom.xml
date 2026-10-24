@@ -250,6 +250,12 @@
                                     <code>java.method.removed</code>
                                     <old>method java.util.concurrent.CompletableFuture&lt;?&gt; io.trino.spi.connector.ConnectorMetadata::refreshMaterializedView(io.trino.spi.connector.ConnectorSession, io.trino.spi.connector.SchemaTableName)</old>
                                 </item>
+                                <item>
+                                    <ignore>true</ignore>
+                                    <code>java.annotation.removed</code>
+                                    <old>method boolean[] io.trino.spi.predicate.SortedRangeSet::getInclusive()</old>
+                                    <justification>JSON serialization moved to a getter that omits all-inclusive markers; the Java accessor is unchanged</justification>
+                                </item>
                             </differences>
                         </revapi.differences>
                     </analysisConfiguration>
