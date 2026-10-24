@@ -27,6 +27,7 @@ import io.trino.spi.type.Type;
 import org.assertj.core.api.AssertProvider;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -770,6 +771,82 @@ class TestSortedRangeSet
                 .linearDiscreteSetUnion(SortedRangeSet.of(BIGINT, 1L, 2L, 12L, 20L, 21L, 30L));
         assertThat(result).isEqualTo(SortedRangeSet.of(BIGINT, 1L, 2L, 10L, 11L, 12L, 20L, 21L, 30L));
         assertThat(result.isDiscreteSet()).isTrue();
+    }
+
+    @Test
+    public void testUnionManyDiscreteSets()
+    {
+        for (int setCount : List.of(2, 3, 5, 8, 20)) {
+            List<ValueSet> sets = new ArrayList<>();
+            for (int setIndex = 0; setIndex < setCount; setIndex++) {
+                int offset = setIndex;
+                sets.add(SortedRangeSet.of(BIGINT, LongStream.range(0, 50).map(index -> index * setCount + offset).boxed().toList()));
+            }
+            ValueSet result = sets.get(0).union(sets.subList(1, sets.size()));
+            assertThat(result).isEqualTo(SortedRangeSet.of(BIGINT, LongStream.range(0, 50L * setCount).boxed().toList()));
+            assertThat(result.isDiscreteSet()).isTrue();
+        }
+
+        SortedRangeSet result = SortedRangeSet.of(BIGINT, 1L, 5L, 9L)
+                .union(List.of(
+                        SortedRangeSet.of(BIGINT, 5L, 7L),
+                        SortedRangeSet.of(BIGINT, 5L, 9L, 11L),
+                        SortedRangeSet.of(BIGINT, 1L)));
+        assertThat(result).isEqualTo(SortedRangeSet.of(BIGINT, 1L, 5L, 7L, 9L, 11L));
+        assertThat(result.isDiscreteSet()).isTrue();
+
+        result = SortedRangeSet.of(BIGINT, LongStream.rangeClosed(1, 10).boxed().toList())
+                .union(List.of(
+                        SortedRangeSet.of(BIGINT, LongStream.rangeClosed(11, 20).boxed().toList()),
+                        SortedRangeSet.of(BIGINT, LongStream.rangeClosed(5, 15).boxed().toList()),
+                        SortedRangeSet.of(BIGINT, LongStream.rangeClosed(30, 40).boxed().toList())));
+        assertThat(result).isEqualTo(SortedRangeSet.of(BIGINT, LongStream.concat(LongStream.rangeClosed(1, 20), LongStream.rangeClosed(30, 40)).boxed().toList()));
+        assertThat(result.isDiscreteSet()).isTrue();
+
+        SortedRangeSet valueBlockBacked = SortedRangeSet.of(BIGINT, 2L, 6L).union(List.of(SortedRangeSet.of(BIGINT, 4L)));
+        result = valueBlockBacked.union(List.of(SortedRangeSet.of(BIGINT, 1L, 3L, 4L), valueBlockBacked, SortedRangeSet.of(BIGINT, 7L)));
+        assertThat(result).isEqualTo(SortedRangeSet.of(BIGINT, 1L, 2L, 3L, 4L, 6L, 7L));
+        assertThat(result.isDiscreteSet()).isTrue();
+
+        result = SortedRangeSet.of(VARCHAR, utf8Slice("a"), utf8Slice("c"))
+                .union(List.of(SortedRangeSet.of(VARCHAR, utf8Slice("b")), SortedRangeSet.of(VARCHAR, utf8Slice("c"), utf8Slice("d"))));
+        assertThat(result).isEqualTo(SortedRangeSet.of(VARCHAR, utf8Slice("a"), utf8Slice("b"), utf8Slice("c"), utf8Slice("d")));
+        assertThat(result.isDiscreteSet()).isTrue();
+    }
+
+    @Test
+    public void testUnionManyWithEmptyAndAllSets()
+    {
+        SortedRangeSet result = SortedRangeSet.none(BIGINT)
+                .union(List.of(SortedRangeSet.none(BIGINT), SortedRangeSet.of(BIGINT, 2L), SortedRangeSet.none(BIGINT), SortedRangeSet.of(BIGINT, 1L, 3L)));
+        assertThat(result).isEqualTo(SortedRangeSet.of(BIGINT, 1L, 2L, 3L));
+        assertThat(result.isDiscreteSet()).isTrue();
+
+        assertThat(SortedRangeSet.none(BIGINT).union(List.of(SortedRangeSet.none(BIGINT), SortedRangeSet.none(BIGINT))).isNone()).isTrue();
+
+        SortedRangeSet single = SortedRangeSet.of(BIGINT, 1L, 2L);
+        assertThat(SortedRangeSet.none(BIGINT).union(List.of(SortedRangeSet.none(BIGINT), single))).isSameAs(single);
+        assertThat(single.union(List.of(SortedRangeSet.none(BIGINT)))).isSameAs(single);
+
+        assertThat(SortedRangeSet.of(BIGINT, 1L).union(List.of(SortedRangeSet.of(BIGINT, 2L), SortedRangeSet.all(BIGINT)))).isEqualTo(SortedRangeSet.all(BIGINT));
+    }
+
+    @Test
+    public void testUnionManyMixedSets()
+    {
+        SortedRangeSet result = SortedRangeSet.of(BIGINT, 1L, 5L)
+                .union(List.of(
+                        SortedRangeSet.of(Range.range(BIGINT, 2L, true, 3L, true)),
+                        SortedRangeSet.of(BIGINT, 4L, 6L),
+                        SortedRangeSet.of(Range.greaterThan(BIGINT, 10L))));
+        assertThat(result).isEqualTo(SortedRangeSet.of(
+                Range.equal(BIGINT, 1L),
+                Range.range(BIGINT, 2L, true, 3L, true),
+                Range.equal(BIGINT, 4L),
+                Range.equal(BIGINT, 5L),
+                Range.equal(BIGINT, 6L),
+                Range.greaterThan(BIGINT, 10L)));
+        assertThat(result.isDiscreteSet()).isFalse();
     }
 
     @Test

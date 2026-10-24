@@ -42,6 +42,7 @@ import static io.airlift.slice.SizeOf.instanceSize;
 import static io.airlift.slice.SizeOf.sizeOf;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.BLOCK_POSITION;
 import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.BLOCK_POSITION_NOT_NULL;
+import static io.trino.spi.function.InvocationConvention.InvocationArgumentConvention.VALUE_BLOCK_POSITION_NOT_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.DEFAULT_ON_NULL;
 import static io.trino.spi.function.InvocationConvention.InvocationReturnConvention.FAIL_ON_NULL;
 import static io.trino.spi.function.InvocationConvention.simpleConvention;
@@ -937,19 +938,36 @@ public final class SortedRangeSet
             return this;
         }
 
-        // Logically this organizes all value sets (this and valueSets) into a binary tree and merges them pairwise, bottom-up.
-        // TODO generalize union(SortedRangeSet) to merge multiple sources at once
-
         List<SortedRangeSet> toUnion = new ArrayList<>(1 + valueSets.size());
-        toUnion.add(this);
+        boolean allDiscrete = true;
+        if (!this.isNone()) {
+            toUnion.add(this);
+            allDiscrete = this.discreteSetMarker == DISCRETE;
+        }
         for (ValueSet valueSet : valueSets) {
             SortedRangeSet other = checkCompatibility(valueSet);
             if (other.isAll()) {
                 return other;
             }
+            if (other.isNone()) {
+                continue;
+            }
             toUnion.add(other);
+            allDiscrete = allDiscrete && other.discreteSetMarker == DISCRETE;
         }
 
+        if (toUnion.isEmpty()) {
+            return this;
+        }
+        if (toUnion.size() == 1) {
+            return toUnion.get(0);
+        }
+        if (allDiscrete) {
+            return linearDiscreteSetUnion(toUnion);
+        }
+
+        // Logically this organizes all value sets (this and valueSets) into a binary tree and merges them pairwise, bottom-up.
+        // TODO generalize union(SortedRangeSet) to merge multiple sources at once
         while (toUnion.size() > 1) {
             List<SortedRangeSet> unioned = new ArrayList<>((toUnion.size() + 1) / 2);
             for (int i = 0; i < toUnion.size() - 1; i += 2) {
@@ -1123,6 +1141,139 @@ public final class SortedRangeSet
         }
 
         return new SortedRangeSet(type, inclusive, blockBuilder.build(), leftRangeSet.unionIsDiscreteSet(rightRangeSet, resultRangeIndex > 0));
+    }
+
+    // Merges two or more non-empty discrete sets of the same type in one pass using a loser tree over the per-set cursors.
+    private static SortedRangeSet linearDiscreteSetUnion(List<SortedRangeSet> rangeSets)
+    {
+        int setCount = rangeSets.size();
+        Type type = rangeSets.get(0).type;
+        MethodHandle valueComparisonOperator = TUPLE_DOMAIN_TYPE_OPERATORS.getComparisonUnorderedLastOperator(
+                type,
+                simpleConvention(FAIL_ON_NULL, VALUE_BLOCK_POSITION_NOT_NULL, VALUE_BLOCK_POSITION_NOT_NULL));
+
+        Block[] sortedRangesBlocks = new Block[setCount];
+        ValueBlock[] valueBlocks = new ValueBlock[setCount];
+        int[] rangeCounts = new int[setCount];
+        // range index of the current value of each set
+        int[] nextRangeIndexes = new int[setCount];
+        // position of the current value of each set within its value block
+        int[] currentPositions = new int[setCount];
+        int totalRangeCount = 0;
+        for (int setIndex = 0; setIndex < setCount; setIndex++) {
+            SortedRangeSet rangeSet = rangeSets.get(setIndex);
+            sortedRangesBlocks[setIndex] = rangeSet.sortedRanges;
+            valueBlocks[setIndex] = rangeSet.sortedRanges.getUnderlyingValueBlock();
+            rangeCounts[setIndex] = rangeSet.getRangeCount();
+            currentPositions[setIndex] = rangeSet.sortedRanges.getUnderlyingValuePosition(0);
+            totalRangeCount += rangeCounts[setIndex];
+        }
+
+        // Leaves are the sets, conceptually at nodes setCount to 2 * setCount - 1, and node n has the children 2n and 2n + 1.
+        // tree[n] holds the set that lost the match at node n, tree[0] the overall winner. An exhausted set is -1 and loses every match.
+        int[] tree = new int[setCount];
+        int[] winners = new int[setCount];
+        for (int node = setCount - 1; node >= 1; node--) {
+            int leftWinner = childWinner(2 * node, setCount, winners);
+            int rightWinner = childWinner(2 * node + 1, setCount, winners);
+            if (isLess(valueComparisonOperator, valueBlocks, currentPositions, leftWinner, rightWinner)) {
+                tree[node] = rightWinner;
+                winners[node] = leftWinner;
+            }
+            else {
+                tree[node] = leftWinner;
+                winners[node] = rightWinner;
+            }
+        }
+        tree[0] = winners[1];
+
+        BlockBuilder blockBuilder = type.createBlockBuilder(null, 2 * totalRangeCount);
+        int resultRangeCount = 0;
+        // values already consumed from the winning set but not yet copied to the result
+        int runSet = tree[0];
+        int runStart = 0;
+        int runLength = 0;
+        int lastPosition = -1;
+        while (tree[0] >= 0) {
+            int winner = tree[0];
+            if (winner != runSet) {
+                if (compareValues(valueComparisonOperator, valueBlocks[winner], currentPositions[winner], valueBlocks[runSet], lastPosition) == 0) {
+                    advance(valueComparisonOperator, valueBlocks, currentPositions, sortedRangesBlocks, rangeCounts, nextRangeIndexes, tree, winner);
+                    continue;
+                }
+                blockBuilder.appendBlockRange(sortedRangesBlocks[runSet], runStart * 2, runLength * 2);
+                resultRangeCount += runLength;
+                runSet = winner;
+                runStart = nextRangeIndexes[winner];
+                runLength = 0;
+            }
+            runLength++;
+            lastPosition = currentPositions[winner];
+            advance(valueComparisonOperator, valueBlocks, currentPositions, sortedRangesBlocks, rangeCounts, nextRangeIndexes, tree, winner);
+        }
+        blockBuilder.appendBlockRange(sortedRangesBlocks[runSet], runStart * 2, runLength * 2);
+        resultRangeCount += runLength;
+
+        boolean[] inclusive = new boolean[resultRangeCount * 2];
+        Arrays.fill(inclusive, true);
+        return new SortedRangeSet(type, inclusive, blockBuilder.build(), DISCRETE);
+    }
+
+    private static int childWinner(int node, int setCount, int[] winners)
+    {
+        if (node >= setCount) {
+            return node - setCount;
+        }
+        return winners[node];
+    }
+
+    // Moves the set to its next value and replays its matches up the loser tree.
+    private static void advance(
+            MethodHandle valueComparisonOperator,
+            ValueBlock[] valueBlocks,
+            int[] currentPositions,
+            Block[] sortedRangesBlocks,
+            int[] rangeCounts,
+            int[] nextRangeIndexes,
+            int[] tree,
+            int setIndex)
+    {
+        int candidate = -1;
+        int nextRangeIndex = nextRangeIndexes[setIndex] + 1;
+        nextRangeIndexes[setIndex] = nextRangeIndex;
+        if (nextRangeIndex < rangeCounts[setIndex]) {
+            currentPositions[setIndex] = sortedRangesBlocks[setIndex].getUnderlyingValuePosition(nextRangeIndex * 2);
+            candidate = setIndex;
+        }
+        for (int node = (setIndex + tree.length) / 2; node > 0; node /= 2) {
+            if (isLess(valueComparisonOperator, valueBlocks, currentPositions, tree[node], candidate)) {
+                int loser = candidate;
+                candidate = tree[node];
+                tree[node] = loser;
+            }
+        }
+        tree[0] = candidate;
+    }
+
+    private static boolean isLess(MethodHandle valueComparisonOperator, ValueBlock[] valueBlocks, int[] currentPositions, int leftSet, int rightSet)
+    {
+        if (leftSet < 0) {
+            return false;
+        }
+        if (rightSet < 0) {
+            return true;
+        }
+        return compareValues(valueComparisonOperator, valueBlocks[leftSet], currentPositions[leftSet], valueBlocks[rightSet], currentPositions[rightSet]) < 0;
+    }
+
+    private static int compareValues(MethodHandle valueComparisonOperator, ValueBlock leftBlock, int leftPosition, ValueBlock rightBlock, int rightPosition)
+    {
+        try {
+            return (int) (long) valueComparisonOperator.invokeExact(leftBlock, leftPosition, rightBlock, rightPosition);
+        }
+        catch (Throwable throwable) {
+            throw handleThrowable(throwable);
+        }
     }
 
     private DiscreteSetMarker unionIsDiscreteSet(SortedRangeSet that, boolean nonEmpty)

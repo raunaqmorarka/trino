@@ -106,6 +106,12 @@ public class BenchmarkSortedRangeSet
     }
 
     @Benchmark
+    public ValueSet unionManyDiscrete(Data data)
+    {
+        return data.manyDiscreteSets.getFirst().union(data.manyDiscreteSets.subList(1, data.manyDiscreteSets.size()));
+    }
+
+    @Benchmark
     public List<Boolean> overlapsSmall(Data data)
     {
         return benchmarkOverlaps(data.smallRanges, data.smallRanges);
@@ -316,6 +322,21 @@ public class BenchmarkSortedRangeSet
         public SortedRangeSet largeRangeSortedRangeSet = SortedRangeSet.of(
                 Range.range(BIGINT, 0L, true, 9L, true),
                 LongStream.rangeClosed(1L, 100_000L).mapToObj(l -> Range.range(BIGINT, l * 10, l % 2 == 1, (l + 1) * 10 - 1, l % 2 == 0)).toList().toArray(Range[]::new));
+        // disjoint discrete sets whose values interleave, like the per-task domains of a partitioned dynamic filter
+        public List<ValueSet> manyDiscreteSets = generateInterleavedDiscreteSets(20, 5_000);
+
+        private static List<ValueSet> generateInterleavedDiscreteSets(int setCount, int valuesPerSet)
+        {
+            List<ValueSet> sets = new ArrayList<>(setCount);
+            for (int setIndex = 0; setIndex < setCount; setIndex++) {
+                List<Long> values = new ArrayList<>(valuesPerSet);
+                for (int valueIndex = 0; valueIndex < valuesPerSet; valueIndex++) {
+                    values.add((long) valueIndex * setCount + setIndex);
+                }
+                sets.add(SortedRangeSet.of(BIGINT, values));
+            }
+            return sets;
+        }
 
         @Setup(Level.Iteration)
         public void init()
@@ -370,6 +391,7 @@ public class BenchmarkSortedRangeSet
 
         unionSmall(data);
         unionLarge(data);
+        unionManyDiscrete(data);
         linearUnionDiscreteOnLarge(data);
 
         overlapsSmall(data);
