@@ -75,10 +75,11 @@ public final class SortedRangeSet
     private static final int INSTANCE_SIZE = instanceSize(SortedRangeSet.class);
 
     private final Type type;
-    private final MethodHandle equalOperator;
-    private final MethodHandle hashCodeOperator;
-    private final MethodHandle comparisonOperator;
-    private final MethodHandle rangeComparisonOperator;
+    // resolved on first use; a racy duplicate lookup yields an equivalent handle
+    private MethodHandle equalOperator;
+    private MethodHandle hashCodeOperator;
+    private MethodHandle comparisonOperator;
+    private MethodHandle rangeComparisonOperator;
 
     private final boolean[] inclusive;
     private final Block sortedRanges;
@@ -101,12 +102,6 @@ public final class SortedRangeSet
             throw new IllegalArgumentException("Type is not orderable: " + type);
         }
         this.type = type;
-        this.equalOperator = TUPLE_DOMAIN_TYPE_OPERATORS.getEqualOperator(type, simpleConvention(DEFAULT_ON_NULL, BLOCK_POSITION_NOT_NULL, BLOCK_POSITION_NOT_NULL));
-        this.hashCodeOperator = TUPLE_DOMAIN_TYPE_OPERATORS.getHashCodeOperator(type, simpleConvention(FAIL_ON_NULL, BLOCK_POSITION_NOT_NULL));
-        // choice of placing unordered values first or last does not matter for this code
-        this.comparisonOperator = TUPLE_DOMAIN_TYPE_OPERATORS.getComparisonUnorderedLastOperator(type, simpleConvention(FAIL_ON_NULL, BLOCK_POSITION, BLOCK_POSITION));
-        // Calculating the comparison operator once instead of per range to avoid hitting TypeOperators cache
-        this.rangeComparisonOperator = Range.getComparisonOperator(type);
 
         requireNonNull(inclusive, "inclusive is null");
         requireNonNull(sortedRanges, "sortedRanges is null");
@@ -129,6 +124,48 @@ public final class SortedRangeSet
         this.inclusive = inclusive;
         this.sortedRanges = sortedRanges;
         this.discreteSetMarker = requireNonNull(discreteSetMarker, "discreteSetMarker is null");
+    }
+
+    private MethodHandle getEqualOperator()
+    {
+        MethodHandle operator = equalOperator;
+        if (operator == null) {
+            operator = TUPLE_DOMAIN_TYPE_OPERATORS.getEqualOperator(type, simpleConvention(DEFAULT_ON_NULL, BLOCK_POSITION_NOT_NULL, BLOCK_POSITION_NOT_NULL));
+            equalOperator = operator;
+        }
+        return operator;
+    }
+
+    private MethodHandle getHashCodeOperator()
+    {
+        MethodHandle operator = hashCodeOperator;
+        if (operator == null) {
+            operator = TUPLE_DOMAIN_TYPE_OPERATORS.getHashCodeOperator(type, simpleConvention(FAIL_ON_NULL, BLOCK_POSITION_NOT_NULL));
+            hashCodeOperator = operator;
+        }
+        return operator;
+    }
+
+    private MethodHandle getComparisonOperator()
+    {
+        MethodHandle operator = comparisonOperator;
+        if (operator == null) {
+            // choice of placing unordered values first or last does not matter for this code
+            operator = TUPLE_DOMAIN_TYPE_OPERATORS.getComparisonUnorderedLastOperator(type, simpleConvention(FAIL_ON_NULL, BLOCK_POSITION, BLOCK_POSITION));
+            comparisonOperator = operator;
+        }
+        return operator;
+    }
+
+    private MethodHandle getRangeComparisonOperator()
+    {
+        MethodHandle operator = rangeComparisonOperator;
+        if (operator == null) {
+            // Calculating the comparison operator once instead of per range to avoid hitting TypeOperators cache
+            operator = Range.getComparisonOperator(type);
+            rangeComparisonOperator = operator;
+        }
+        return operator;
     }
 
     static SortedRangeSet none(Type type)
@@ -434,8 +471,8 @@ public final class SortedRangeSet
         Block valueAsBlock = writeNativeValue(type, value);
         RangeView valueRange = new RangeView(
                 type,
-                comparisonOperator,
-                rangeComparisonOperator,
+                getComparisonOperator(),
+                getRangeComparisonOperator(),
                 true,
                 valueAsBlock,
                 0,
@@ -472,8 +509,8 @@ public final class SortedRangeSet
         int lastIndex = (getRangeCount() - 1) * 2 + 1;
         return new RangeView(
                 type,
-                comparisonOperator,
-                rangeComparisonOperator,
+                getComparisonOperator(),
+                getRangeComparisonOperator(),
                 inclusive[0],
                 sortedRanges,
                 0,
@@ -494,8 +531,8 @@ public final class SortedRangeSet
         int rangeRight = 2 * rangeIndex + 1;
         return new RangeView(
                 type,
-                comparisonOperator,
-                rangeComparisonOperator,
+                getComparisonOperator(),
+                getRangeComparisonOperator(),
                 inclusive[rangeLeft],
                 sortedRanges,
                 rangeLeft,
@@ -601,6 +638,7 @@ public final class SortedRangeSet
 
         int currentIntersectionStart = -1;
 
+        MethodHandle comparisonOperator = getComparisonOperator();
         while (thisNextRangeIndex < thisRangeCount && thatNextRangeIndex < thatRangeCount) {
             int compare = compareValues(
                     comparisonOperator,
@@ -1110,6 +1148,7 @@ public final class SortedRangeSet
         // at the corresponding index on the right side. This is maintained by comparing and swapping.
         // Due to this property, we can safely add all values from the left side up to
         // leftNextRangeIndex in bulk, thus preserving sorted order.
+        MethodHandle comparisonOperator = getComparisonOperator();
         while (leftNextRangeIndex < leftRangeCount && rightNextRangeIndex < rightRangeCount) {
             int compare = compareValues(
                     comparisonOperator,
@@ -1432,6 +1471,7 @@ public final class SortedRangeSet
         int hash = lazyHash;
         if (hash == 0) {
             hash = Objects.hash(type, Arrays.hashCode(inclusive));
+            MethodHandle hashCodeOperator = getHashCodeOperator();
             for (int position = 0; position < sortedRanges.getPositionCount(); position++) {
                 boolean positionIsNull = sortedRanges.isNull(position);
                 hash = hash * 31 + Boolean.hashCode(positionIsNull);
@@ -1492,7 +1532,7 @@ public final class SortedRangeSet
         }
         boolean equal;
         try {
-            equal = (boolean) equalOperator.invokeExact(leftBlock, leftPosition, rightBlock, rightPosition);
+            equal = (boolean) getEqualOperator().invokeExact(leftBlock, leftPosition, rightBlock, rightPosition);
         }
         catch (Throwable throwable) {
             throw handleThrowable(throwable);
