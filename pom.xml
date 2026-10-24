@@ -28,6 +28,7 @@
     </licenses>
 
     <modules>
+        <module>airlift-http-server</module>
         <module>client/trino-cli</module>
         <module>client/trino-client</module>
         <module>client/trino-jdbc</module>
