@@ -189,6 +189,11 @@ public class IcebergSplitSource
     private CloseableIterator<FileScanTask> fileScanIterator;
     @GuardedBy("this")
     private Iterator<FileScanTaskWithContext> fileTasksIterator = emptyIterator();
+    // column handles for predicatedColumnIds, rebuilt only when the file schema changes
+    @GuardedBy("this")
+    private Schema predicatedColumnsSchema;
+    @GuardedBy("this")
+    private List<IcebergColumnHandle> predicatedColumns = ImmutableList.of();
 
     private final boolean recordScannedFiles;
     private final Map<Integer, PartitionSpec> specsById;
@@ -407,7 +412,7 @@ public class IcebergSplitSource
     {
         FileScanTask wholeFileTask = fileScanIterator.next();
         boolean fileHasNoDeletions = wholeFileTask.deletes().isEmpty();
-        FileScanTaskWithContext fileScanTaskWithDomain = createFileScanTaskWithContext(wholeFileTask, this.predicatedColumnIds);
+        FileScanTaskWithContext fileScanTaskWithDomain = createFileScanTaskWithContext(wholeFileTask);
         if (pruneFileScanTask(fileScanTaskWithDomain, fileHasNoDeletions, dynamicFilterPredicate)) {
             return ImmutableList.of();
         }
@@ -602,13 +607,21 @@ public class IcebergSplitSource
         }
     }
 
-    private FileScanTaskWithContext createFileScanTaskWithContext(FileScanTask wholeFileTask, Set<Integer> predicatedColumnIds)
+    private synchronized List<IcebergColumnHandle> getPredicatedColumns(Schema schema)
     {
-        verify(predicatedColumnIds != null, "predicatedColumnIds is null");
-        List<IcebergColumnHandle> predicatedColumns = wholeFileTask.schema().columns().stream()
-                .filter(column -> predicatedColumnIds.contains(column.fieldId()))
-                .map(column -> getColumnHandle(column, typeManager))
-                .collect(toImmutableList());
+        if (schema != predicatedColumnsSchema) {
+            predicatedColumns = schema.columns().stream()
+                    .filter(column -> predicatedColumnIds.contains(column.fieldId()))
+                    .map(column -> getColumnHandle(column, typeManager))
+                    .collect(toImmutableList());
+            predicatedColumnsSchema = schema;
+        }
+        return predicatedColumns;
+    }
+
+    private FileScanTaskWithContext createFileScanTaskWithContext(FileScanTask wholeFileTask)
+    {
+        List<IcebergColumnHandle> predicatedColumns = getPredicatedColumns(wholeFileTask.schema());
         List<DeleteFile> deleteFiles = wholeFileTask.deletes().stream()
                 .peek(file -> verifyDeletionVectorReferencesDataFile(wholeFileTask, file))
                 .map(file -> DeleteFile.fromIceberg(file, parquetFileDecryptionData(
