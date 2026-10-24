@@ -15,10 +15,12 @@ package io.trino.block;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.core.Base64Variants;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.json.JsonMapperProvider;
+import io.airlift.slice.DynamicSliceOutput;
 import io.trino.spi.block.Block;
 import io.trino.spi.type.Type;
 import org.junit.jupiter.api.Test;
@@ -26,6 +28,7 @@ import org.junit.jupiter.api.Test;
 import static io.trino.block.BlockAssertions.assertBlockEquals;
 import static io.trino.block.BlockAssertions.createLongsBlock;
 import static io.trino.block.BlockAssertions.createStringsBlock;
+import static io.trino.block.BlockSerdeUtil.writeBlock;
 import static io.trino.metadata.InternalBlockEncodingSerde.TESTING_BLOCK_ENCODING_SERDE;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.VarcharType.VARCHAR;
@@ -69,12 +72,25 @@ public class TestBlockJsonSerde
         assertBlockEquals(VARCHAR, deserialized, block);
     }
 
+    @Test
+    public void testJsonIsPaddedBase64OfBlockEncoding()
+            throws Exception
+    {
+        Block block = createStringsBlock("alice", null, "bob");
+        DynamicSliceOutput output = new DynamicSliceOutput(64);
+        writeBlock(TESTING_BLOCK_ENCODING_SERDE, output, block);
+        String expected = "\"" + Base64Variants.MIME_NO_LINEFEEDS.encode(output.slice().getBytes()) + "\"";
+        assertThat(new String(MAPPER.writeValueAsBytes(block), UTF_8)).isEqualTo(expected);
+        assertThat(MAPPER.writeValueAsString(block)).isEqualTo(expected);
+    }
+
     private static void assertRoundTrip(Type type, Block block)
             throws Exception
     {
         byte[] json = MAPPER.writeValueAsBytes(block);
         assertBlockEquals(type, MAPPER.readValue(json, Block.class), block);
         assertBlockEquals(type, MAPPER.readValue(new String(json, UTF_8), Block.class), block);
+        assertBlockEquals(type, MAPPER.readValue(MAPPER.writeValueAsString(block), Block.class), block);
     }
 
     public record Holder(String name, Block block, int count)
