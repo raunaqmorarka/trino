@@ -19,9 +19,20 @@ import com.google.errorprone.annotations.DoNotCall;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.block.DictionaryBlock;
+import io.trino.spi.block.IntArrayBlock;
+import io.trino.spi.block.LongArrayBlock;
 import io.trino.spi.block.RunLengthEncodedBlock;
 import io.trino.spi.block.ValueBlock;
+import io.trino.spi.block.VariableWidthBlock;
+import io.trino.spi.type.BigintType;
+import io.trino.spi.type.DateType;
+import io.trino.spi.type.DecimalType;
+import io.trino.spi.type.IntegerType;
+import io.trino.spi.type.TimeType;
+import io.trino.spi.type.TimestampType;
 import io.trino.spi.type.Type;
+import io.trino.spi.type.VarbinaryType;
+import io.trino.spi.type.VarcharType;
 import jakarta.annotation.Nullable;
 
 import java.lang.invoke.MethodHandle;
@@ -73,6 +84,21 @@ public final class SortedRangeSet
         implements ValueSet
 {
     private static final int INSTANCE_SIZE = instanceSize(SortedRangeSet.class);
+
+    private static final ValueComparator LONG_VALUE_COMPARATOR = (leftBlock, leftPosition, rightBlock, rightPosition) ->
+            Long.compare(((LongArrayBlock) leftBlock).getLong(leftPosition), ((LongArrayBlock) rightBlock).getLong(rightPosition));
+    private static final ValueComparator INT_VALUE_COMPARATOR = (leftBlock, leftPosition, rightBlock, rightPosition) ->
+            Integer.compare(((IntArrayBlock) leftBlock).getInt(leftPosition), ((IntArrayBlock) rightBlock).getInt(rightPosition));
+    private static final ValueComparator SLICE_VALUE_COMPARATOR = (leftBlock, leftPosition, rightBlock, rightPosition) -> {
+        VariableWidthBlock left = (VariableWidthBlock) leftBlock;
+        VariableWidthBlock right = (VariableWidthBlock) rightBlock;
+        return left.getRawSlice().compareTo(
+                left.getRawSliceOffset(leftPosition),
+                left.getSliceLength(leftPosition),
+                right.getRawSlice(),
+                right.getRawSliceOffset(rightPosition),
+                right.getSliceLength(rightPosition));
+    };
 
     private final Type type;
     // resolved on first use; a racy duplicate lookup yields an equivalent handle
@@ -1141,9 +1167,7 @@ public final class SortedRangeSet
     {
         int setCount = rangeSets.size();
         Type type = rangeSets.get(0).type;
-        MethodHandle valueComparisonOperator = TUPLE_DOMAIN_TYPE_OPERATORS.getComparisonUnorderedLastOperator(
-                type,
-                simpleConvention(FAIL_ON_NULL, VALUE_BLOCK_POSITION_NOT_NULL, VALUE_BLOCK_POSITION_NOT_NULL));
+        ValueComparator valueComparator = valueComparator(type);
 
         Block[] sortedRangesBlocks = new Block[setCount];
         ValueBlock[] valueBlocks = new ValueBlock[setCount];
@@ -1169,7 +1193,7 @@ public final class SortedRangeSet
         for (int node = setCount - 1; node >= 1; node--) {
             int leftWinner = childWinner(2 * node, setCount, winners);
             int rightWinner = childWinner(2 * node + 1, setCount, winners);
-            if (isLess(valueComparisonOperator, valueBlocks, currentPositions, leftWinner, rightWinner)) {
+            if (isLess(valueComparator, valueBlocks, currentPositions, leftWinner, rightWinner)) {
                 tree[node] = rightWinner;
                 winners[node] = leftWinner;
             }
@@ -1190,8 +1214,8 @@ public final class SortedRangeSet
         while (tree[0] >= 0) {
             int winner = tree[0];
             if (winner != runSet) {
-                if (compareValues(valueComparisonOperator, valueBlocks[winner], currentPositions[winner], valueBlocks[runSet], lastPosition) == 0) {
-                    advance(valueComparisonOperator, valueBlocks, currentPositions, sortedRangesBlocks, rangeCounts, nextRangeIndexes, tree, winner);
+                if (valueComparator.compare(valueBlocks[winner], currentPositions[winner], valueBlocks[runSet], lastPosition) == 0) {
+                    advance(valueComparator, valueBlocks, currentPositions, sortedRangesBlocks, rangeCounts, nextRangeIndexes, tree, winner);
                     continue;
                 }
                 blockBuilder.appendBlockRange(sortedRangesBlocks[runSet], runStart * 2, runLength * 2);
@@ -1202,7 +1226,7 @@ public final class SortedRangeSet
             }
             runLength++;
             lastPosition = currentPositions[winner];
-            advance(valueComparisonOperator, valueBlocks, currentPositions, sortedRangesBlocks, rangeCounts, nextRangeIndexes, tree, winner);
+            advance(valueComparator, valueBlocks, currentPositions, sortedRangesBlocks, rangeCounts, nextRangeIndexes, tree, winner);
         }
         blockBuilder.appendBlockRange(sortedRangesBlocks[runSet], runStart * 2, runLength * 2);
         resultRangeCount += runLength;
@@ -1222,7 +1246,7 @@ public final class SortedRangeSet
 
     // Moves the set to its next value and replays its matches up the loser tree.
     private static void advance(
-            MethodHandle valueComparisonOperator,
+            ValueComparator valueComparator,
             ValueBlock[] valueBlocks,
             int[] currentPositions,
             Block[] sortedRangesBlocks,
@@ -1239,7 +1263,7 @@ public final class SortedRangeSet
             candidate = setIndex;
         }
         for (int node = (setIndex + tree.length) / 2; node > 0; node /= 2) {
-            if (isLess(valueComparisonOperator, valueBlocks, currentPositions, tree[node], candidate)) {
+            if (isLess(valueComparator, valueBlocks, currentPositions, tree[node], candidate)) {
                 int loser = candidate;
                 candidate = tree[node];
                 tree[node] = loser;
@@ -1248,7 +1272,7 @@ public final class SortedRangeSet
         tree[0] = candidate;
     }
 
-    private static boolean isLess(MethodHandle valueComparisonOperator, ValueBlock[] valueBlocks, int[] currentPositions, int leftSet, int rightSet)
+    private static boolean isLess(ValueComparator valueComparator, ValueBlock[] valueBlocks, int[] currentPositions, int leftSet, int rightSet)
     {
         if (leftSet < 0) {
             return false;
@@ -1256,17 +1280,41 @@ public final class SortedRangeSet
         if (rightSet < 0) {
             return true;
         }
-        return compareValues(valueComparisonOperator, valueBlocks[leftSet], currentPositions[leftSet], valueBlocks[rightSet], currentPositions[rightSet]) < 0;
+        return valueComparator.compare(valueBlocks[leftSet], currentPositions[leftSet], valueBlocks[rightSet], currentPositions[rightSet]) < 0;
     }
 
-    private static int compareValues(MethodHandle valueComparisonOperator, ValueBlock leftBlock, int leftPosition, ValueBlock rightBlock, int rightPosition)
+    // Types whose comparison operator is the natural order of their native block values skip the operator method handle
+    private static ValueComparator valueComparator(Type type)
     {
-        try {
-            return (int) (long) valueComparisonOperator.invokeExact(leftBlock, leftPosition, rightBlock, rightPosition);
+        if (type instanceof BigintType
+                || type instanceof TimeType
+                || (type instanceof TimestampType timestampType && timestampType.isShort())
+                || (type instanceof DecimalType decimalType && decimalType.isShort())) {
+            return LONG_VALUE_COMPARATOR;
         }
-        catch (Throwable throwable) {
-            throw handleThrowable(throwable);
+        if (type instanceof IntegerType || type instanceof DateType) {
+            return INT_VALUE_COMPARATOR;
         }
+        if (type instanceof VarcharType || type instanceof VarbinaryType) {
+            return SLICE_VALUE_COMPARATOR;
+        }
+        MethodHandle comparisonOperator = TUPLE_DOMAIN_TYPE_OPERATORS.getComparisonUnorderedLastOperator(
+                type,
+                simpleConvention(FAIL_ON_NULL, VALUE_BLOCK_POSITION_NOT_NULL, VALUE_BLOCK_POSITION_NOT_NULL));
+        return (leftBlock, leftPosition, rightBlock, rightPosition) -> {
+            try {
+                return (int) (long) comparisonOperator.invokeExact(leftBlock, leftPosition, rightBlock, rightPosition);
+            }
+            catch (Throwable throwable) {
+                throw handleThrowable(throwable);
+            }
+        };
+    }
+
+    // Compares two non-null values of the set's type stored in value blocks
+    private interface ValueComparator
+    {
+        int compare(ValueBlock leftBlock, int leftPosition, ValueBlock rightBlock, int rightPosition);
     }
 
     private DiscreteSetMarker unionIsDiscreteSet(SortedRangeSet that, boolean nonEmpty)

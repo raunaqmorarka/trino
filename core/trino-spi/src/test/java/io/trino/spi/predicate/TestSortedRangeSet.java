@@ -40,12 +40,16 @@ import static io.airlift.slice.Slices.utf8Slice;
 import static io.trino.spi.predicate.SortedRangeSet.DiscreteSetMarker.UNKNOWN;
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.BooleanType.BOOLEAN;
+import static io.trino.spi.type.DateType.DATE;
 import static io.trino.spi.type.DecimalType.createDecimalType;
 import static io.trino.spi.type.DoubleType.DOUBLE;
 import static io.trino.spi.type.IntegerType.INTEGER;
 import static io.trino.spi.type.RealType.REAL;
 import static io.trino.spi.type.SmallintType.SMALLINT;
+import static io.trino.spi.type.TimeType.TIME_MILLIS;
+import static io.trino.spi.type.TimestampType.TIMESTAMP_MILLIS;
 import static io.trino.spi.type.TinyintType.TINYINT;
+import static io.trino.spi.type.VarbinaryType.VARBINARY;
 import static io.trino.spi.type.VarcharType.VARCHAR;
 import static io.trino.spi.type.VarcharType.createVarcharType;
 import static java.lang.Float.floatToRawIntBits;
@@ -852,6 +856,68 @@ class TestSortedRangeSet
                 Range.equal(BIGINT, 6L),
                 Range.greaterThan(BIGINT, 10L)));
         assertThat(result.isDiscreteSet()).isFalse();
+    }
+
+    @Test
+    public void testUnionManyDiscreteSetsOfEachType()
+    {
+        assertUnionOfInterleavedSets(BIGINT, List.of(Long.MIN_VALUE, -7L, -1L, 0L, 1L, 2L, 3L, 100L, 1000L, Long.MAX_VALUE));
+        assertUnionOfInterleavedSets(INTEGER, List.of((long) Integer.MIN_VALUE, -7L, -1L, 0L, 1L, 2L, 3L, 100L, 1000L, (long) Integer.MAX_VALUE));
+        assertUnionOfInterleavedSets(SMALLINT, List.of(-300L, -7L, -1L, 0L, 1L, 2L, 3L, 100L, 1000L, 30000L));
+        assertUnionOfInterleavedSets(TINYINT, List.of(-128L, -7L, -1L, 0L, 1L, 2L, 3L, 10L, 100L, 127L));
+        assertUnionOfInterleavedSets(DATE, List.of(-10000L, -7L, -1L, 0L, 1L, 2L, 3L, 100L, 1000L, 20000L));
+        assertUnionOfInterleavedSets(TIME_MILLIS, List.of(0L, 1L, 2L, 3L, 1_000_000_000L, 2_000_000_000L, 3_000_000_000L, 86_399_000_000_000_000L));
+        assertUnionOfInterleavedSets(TIMESTAMP_MILLIS, List.of(-1_000_000L, -7L, -1L, 0L, 1L, 2L, 3L, 100L, 1_000_000L, 1_700_000_000_000_000L));
+        assertUnionOfInterleavedSets(createDecimalType(10, 2), List.of(-100000L, -7L, -1L, 0L, 1L, 2L, 3L, 100L, 1000L, 9999999999L));
+        assertUnionOfInterleavedSets(REAL, Stream.of(-3.5f, -1f, -0.5f, 0f, 0.25f, 1f, 2f, 100f, 1e9f, Float.MAX_VALUE)
+                .map(value -> (long) floatToRawIntBits(value))
+                .toList());
+        assertUnionOfInterleavedSets(DOUBLE, List.of(-3.5, -1.0, -0.5, 0.0, 0.25, 1.0, 2.0, 100.0, 1e9, Double.MAX_VALUE));
+        assertUnionOfInterleavedSets(VARCHAR, Stream.of("", "a", "aa", "ab", "b", "ba", "bb", "c", "a".repeat(40), "b".repeat(40))
+                .sorted()
+                .map(Slices::utf8Slice)
+                .toList());
+        assertUnionOfInterleavedSets(createVarcharType(2), List.of(utf8Slice(""), utf8Slice("a"), utf8Slice("aa"), utf8Slice("ab"), utf8Slice("b"), utf8Slice("bb")));
+        assertUnionOfInterleavedSets(VARBINARY, List.of(
+                Slices.wrappedBuffer(),
+                Slices.wrappedBuffer((byte) 0x00),
+                Slices.wrappedBuffer((byte) 0x01),
+                Slices.wrappedBuffer((byte) 0x01, (byte) 0x00),
+                Slices.wrappedBuffer((byte) 0x7F),
+                Slices.wrappedBuffer((byte) 0x80),
+                Slices.wrappedBuffer((byte) 0xFF),
+                Slices.wrappedBuffer((byte) 0xFF, (byte) 0xFF)));
+    }
+
+    // values are the expected union in increasing order; set i takes every setCount-th value and every set shares the first and last value
+    private static void assertUnionOfInterleavedSets(Type type, List<?> values)
+    {
+        SortedRangeSet expected = SortedRangeSet.of(type, values);
+        assertThat(expected.getRangeCount()).isEqualTo(values.size());
+        for (int setCount : List.of(2, 3, 7)) {
+            List<ValueSet> sets = new ArrayList<>();
+            List<List<Object>> setValues = new ArrayList<>();
+            for (int setIndex = 0; setIndex < setCount; setIndex++) {
+                List<Object> currentValues = new ArrayList<>();
+                currentValues.add(values.getFirst());
+                for (int valueIndex = setIndex; valueIndex < values.size(); valueIndex += setCount) {
+                    currentValues.add(values.get(valueIndex));
+                }
+                currentValues.add(values.getLast());
+                setValues.add(currentValues);
+                sets.add(SortedRangeSet.of(type, currentValues));
+            }
+
+            ValueSet result = sets.get(0).union(sets.subList(1, setCount));
+            assertThat(result).isEqualTo(expected);
+            assertThat(result.isDiscreteSet()).isTrue();
+
+            List<Object> firstTwoValues = new ArrayList<>(setValues.get(0));
+            firstTwoValues.addAll(setValues.get(1));
+            result = sets.get(0).union(sets.get(1));
+            assertThat(result).isEqualTo(SortedRangeSet.of(type, firstTwoValues));
+            assertThat(result.isDiscreteSet()).isTrue();
+        }
     }
 
     @Test
