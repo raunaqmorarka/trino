@@ -15,6 +15,7 @@ package io.trino.plugin.iceberg;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import io.trino.spi.type.Type;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DataFiles;
@@ -26,6 +27,7 @@ import org.junit.jupiter.api.Test;
 import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static io.trino.spi.type.BigintType.BIGINT;
 import static io.trino.spi.type.DoubleType.DOUBLE;
@@ -40,10 +42,13 @@ final class TestIcebergStatisticsBuilder
 {
     private static final int COLUMN_A_ID = 1;
     private static final int COLUMN_B_ID = 2;
+    private static final int OTHER_COLUMN_ID = 3;
     private static final Types.NestedField COLUMN_A = optional(COLUMN_A_ID, "a", Types.LongType.get());
     private static final Types.NestedField COLUMN_B = optional(COLUMN_B_ID, "b", Types.DoubleType.get());
+    private static final Types.NestedField OTHER_COLUMN = optional(OTHER_COLUMN_ID, "c", Types.LongType.get());
     private static final List<Types.NestedField> COLUMNS = ImmutableList.of(COLUMN_A, COLUMN_B);
     private static final List<Type> COLUMN_TYPES = ImmutableList.of(BIGINT, DOUBLE);
+    private static final Set<Integer> COLUMN_IDS = ImmutableSet.of(COLUMN_A_ID, COLUMN_B_ID);
 
     private static final long RECORD_COUNT = 10;
     private static final long FILE_SIZE = 1024;
@@ -51,11 +56,11 @@ final class TestIcebergStatisticsBuilder
     @Test
     void testMergeInvalidatesBounds()
     {
-        IcebergStatistics.Builder target = new IcebergStatistics.Builder(COLUMNS, COLUMN_TYPES, TESTING_TYPE_MANAGER);
+        IcebergStatistics.Builder target = new IcebergStatistics.Builder(COLUMNS, COLUMN_TYPES, COLUMN_IDS, TESTING_TYPE_MANAGER);
         target.acceptDataFile(dataFile(bounds(COLUMN_A, 1L), bounds(COLUMN_A, 5L), perColumn(COLUMN_A, 0, COLUMN_B, RECORD_COUNT)), unpartitioned());
 
         // no bounds for column a, and the column is not all nulls, so the bounds are unknown rather than absent
-        IcebergStatistics.Builder other = new IcebergStatistics.Builder(COLUMNS, COLUMN_TYPES, TESTING_TYPE_MANAGER);
+        IcebergStatistics.Builder other = new IcebergStatistics.Builder(COLUMNS, COLUMN_TYPES, COLUMN_IDS, TESTING_TYPE_MANAGER);
         other.acceptDataFile(dataFile(ImmutableMap.of(), ImmutableMap.of(), perColumn(COLUMN_A, 0, COLUMN_B, RECORD_COUNT)), unpartitioned());
 
         target.merge(other);
@@ -68,10 +73,10 @@ final class TestIcebergStatisticsBuilder
     @Test
     void testMergeKeepsBoundsInvalidated()
     {
-        IcebergStatistics.Builder target = new IcebergStatistics.Builder(COLUMNS, COLUMN_TYPES, TESTING_TYPE_MANAGER);
+        IcebergStatistics.Builder target = new IcebergStatistics.Builder(COLUMNS, COLUMN_TYPES, COLUMN_IDS, TESTING_TYPE_MANAGER);
         target.acceptDataFile(dataFile(ImmutableMap.of(), ImmutableMap.of(), perColumn(COLUMN_A, 0, COLUMN_B, RECORD_COUNT)), unpartitioned());
 
-        IcebergStatistics.Builder other = new IcebergStatistics.Builder(COLUMNS, COLUMN_TYPES, TESTING_TYPE_MANAGER);
+        IcebergStatistics.Builder other = new IcebergStatistics.Builder(COLUMNS, COLUMN_TYPES, COLUMN_IDS, TESTING_TYPE_MANAGER);
         other.acceptDataFile(dataFile(bounds(COLUMN_A, 1L), bounds(COLUMN_A, 5L), perColumn(COLUMN_A, 0, COLUMN_B, RECORD_COUNT)), unpartitioned());
 
         target.merge(other);
@@ -85,10 +90,10 @@ final class TestIcebergStatisticsBuilder
     void testMergeCopiesNewColumn()
     {
         // column b is all nulls here, so the target never records statistics for it
-        IcebergStatistics.Builder target = new IcebergStatistics.Builder(COLUMNS, COLUMN_TYPES, TESTING_TYPE_MANAGER);
+        IcebergStatistics.Builder target = new IcebergStatistics.Builder(COLUMNS, COLUMN_TYPES, COLUMN_IDS, TESTING_TYPE_MANAGER);
         target.acceptDataFile(dataFile(bounds(COLUMN_A, 1L), bounds(COLUMN_A, 5L), perColumn(COLUMN_A, 0, COLUMN_B, RECORD_COUNT)), unpartitioned());
 
-        IcebergStatistics.Builder other = new IcebergStatistics.Builder(COLUMNS, COLUMN_TYPES, TESTING_TYPE_MANAGER);
+        IcebergStatistics.Builder other = new IcebergStatistics.Builder(COLUMNS, COLUMN_TYPES, COLUMN_IDS, TESTING_TYPE_MANAGER);
         other.acceptDataFile(dataFile(bounds(COLUMN_B, 2.5), bounds(COLUMN_B, 7.5), perColumn(COLUMN_A, RECORD_COUNT, COLUMN_B, 0)), unpartitioned());
 
         target.merge(other);
@@ -105,11 +110,11 @@ final class TestIcebergStatisticsBuilder
     @Test
     void testMergeCopiesInvalidatedColumn()
     {
-        IcebergStatistics.Builder target = new IcebergStatistics.Builder(COLUMNS, COLUMN_TYPES, TESTING_TYPE_MANAGER);
+        IcebergStatistics.Builder target = new IcebergStatistics.Builder(COLUMNS, COLUMN_TYPES, COLUMN_IDS, TESTING_TYPE_MANAGER);
         target.acceptDataFile(dataFile(bounds(COLUMN_A, 1L), bounds(COLUMN_A, 5L), perColumn(COLUMN_A, 0, COLUMN_B, RECORD_COUNT)), unpartitioned());
 
         // column b has no bounds and is not all nulls, so other holds an invalidated entry for it
-        IcebergStatistics.Builder other = new IcebergStatistics.Builder(COLUMNS, COLUMN_TYPES, TESTING_TYPE_MANAGER);
+        IcebergStatistics.Builder other = new IcebergStatistics.Builder(COLUMNS, COLUMN_TYPES, COLUMN_IDS, TESTING_TYPE_MANAGER);
         other.acceptDataFile(dataFile(ImmutableMap.of(), ImmutableMap.of(), perColumn(COLUMN_A, RECORD_COUNT, COLUMN_B, 0)), unpartitioned());
 
         target.merge(other);
@@ -126,12 +131,12 @@ final class TestIcebergStatisticsBuilder
     @Test
     void testMergeSumsMetrics()
     {
-        IcebergStatistics.Builder target = new IcebergStatistics.Builder(COLUMNS, COLUMN_TYPES, TESTING_TYPE_MANAGER);
+        IcebergStatistics.Builder target = new IcebergStatistics.Builder(COLUMNS, COLUMN_TYPES, COLUMN_IDS, TESTING_TYPE_MANAGER);
         target.acceptDataFile(
                 dataFile(bounds(COLUMN_A, 1L), bounds(COLUMN_A, 5L), perColumn(COLUMN_A, 1, COLUMN_B, 2), perColumn(COLUMN_B, 3), perColumn(COLUMN_A, 64, COLUMN_B, 128)),
                 unpartitioned());
 
-        IcebergStatistics.Builder other = new IcebergStatistics.Builder(COLUMNS, COLUMN_TYPES, TESTING_TYPE_MANAGER);
+        IcebergStatistics.Builder other = new IcebergStatistics.Builder(COLUMNS, COLUMN_TYPES, COLUMN_IDS, TESTING_TYPE_MANAGER);
         other.acceptDataFile(
                 dataFile(bounds(COLUMN_A, 2L), bounds(COLUMN_A, 9L), perColumn(COLUMN_A, 4, COLUMN_B, 0), perColumn(COLUMN_B, 5), perColumn(COLUMN_A, 32)),
                 unpartitioned());
@@ -152,12 +157,64 @@ final class TestIcebergStatisticsBuilder
     @Test
     void testMergeRejectsDifferentColumns()
     {
-        IcebergStatistics.Builder target = new IcebergStatistics.Builder(COLUMNS, COLUMN_TYPES, TESTING_TYPE_MANAGER);
-        IcebergStatistics.Builder other = new IcebergStatistics.Builder(ImmutableList.of(COLUMN_A), ImmutableList.of(BIGINT), TESTING_TYPE_MANAGER);
+        IcebergStatistics.Builder target = new IcebergStatistics.Builder(COLUMNS, COLUMN_TYPES, COLUMN_IDS, TESTING_TYPE_MANAGER);
+        IcebergStatistics.Builder other = new IcebergStatistics.Builder(ImmutableList.of(COLUMN_A), ImmutableList.of(BIGINT), ImmutableSet.of(COLUMN_A_ID), TESTING_TYPE_MANAGER);
+        IcebergStatistics.Builder otherIds = new IcebergStatistics.Builder(COLUMNS, COLUMN_TYPES, ImmutableSet.of(COLUMN_A_ID, COLUMN_B_ID, OTHER_COLUMN_ID), TESTING_TYPE_MANAGER);
 
         assertThatThrownBy(() -> target.merge(other))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("Cannot merge statistics collected for different columns");
+        assertThatThrownBy(() -> target.merge(otherIds))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("Cannot merge statistics collected for different columns");
+    }
+
+    @Test
+    void testRejectsColumnsOutsideColumnIds()
+    {
+        assertThatThrownBy(() -> new IcebergStatistics.Builder(COLUMNS, COLUMN_TYPES, ImmutableSet.of(COLUMN_A_ID), TESTING_TYPE_MANAGER))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("columnIds must contain every column");
+    }
+
+    @Test
+    void testIgnoresStatisticsOfOtherColumns()
+    {
+        IcebergStatistics.Builder builder = new IcebergStatistics.Builder(COLUMNS, COLUMN_TYPES, COLUMN_IDS, TESTING_TYPE_MANAGER);
+        builder.acceptDataFile(
+                dataFile(
+                        bounds(COLUMN_A, 1L),
+                        bounds(COLUMN_A, 5L),
+                        perColumn(COLUMN_A, 1, OTHER_COLUMN, 4),
+                        perColumn(COLUMN_B, 2, OTHER_COLUMN, 5),
+                        ImmutableMap.of(COLUMN_A_ID, 10L, COLUMN_B_ID, 20L, OTHER_COLUMN_ID, 30L)),
+                unpartitioned());
+
+        IcebergStatistics statistics = builder.build();
+        assertThat(statistics.nullCounts()).isEqualTo(ImmutableMap.of(COLUMN_A_ID, 1L));
+        assertThat(statistics.nanCounts()).isEqualTo(ImmutableMap.of(COLUMN_B_ID, 2L));
+        assertThat(statistics.columnSizes()).isEqualTo(ImmutableMap.of(COLUMN_A_ID, 10L, COLUMN_B_ID, 20L));
+    }
+
+    @Test
+    void testSumsMetricsOfNestedFields()
+    {
+        // a nested field id has no top-level column but still gets null counts and sizes
+        IcebergStatistics.Builder builder = new IcebergStatistics.Builder(COLUMNS, COLUMN_TYPES, ImmutableSet.of(COLUMN_A_ID, COLUMN_B_ID, OTHER_COLUMN_ID), TESTING_TYPE_MANAGER);
+        builder.acceptDataFile(
+                dataFile(
+                        bounds(COLUMN_A, 1L),
+                        bounds(COLUMN_A, 5L),
+                        perColumn(COLUMN_A, 1, OTHER_COLUMN, 4),
+                        ImmutableMap.of(),
+                        perColumn(COLUMN_A, 10, OTHER_COLUMN, 30)),
+                unpartitioned());
+
+        IcebergStatistics statistics = builder.build();
+        assertThat(statistics.nullCounts()).isEqualTo(ImmutableMap.of(COLUMN_A_ID, 1L, OTHER_COLUMN_ID, 4L));
+        assertThat(statistics.columnSizes()).isEqualTo(ImmutableMap.of(COLUMN_A_ID, 10L, OTHER_COLUMN_ID, 30L));
+        assertThat(statistics.minValues()).isEqualTo(ImmutableMap.of(COLUMN_A_ID, 1L));
+        assertThat(statistics.maxValues()).isEqualTo(ImmutableMap.of(COLUMN_A_ID, 5L));
     }
 
     private static DataFile dataFile(Map<Integer, ByteBuffer> lowerBounds, Map<Integer, ByteBuffer> upperBounds, Map<Integer, Long> nullValueCounts)

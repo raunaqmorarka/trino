@@ -15,6 +15,7 @@ package io.trino.plugin.iceberg;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import io.trino.spi.TrinoException;
 import io.trino.spi.type.TypeManager;
 import jakarta.annotation.Nullable;
@@ -30,6 +31,7 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.Set;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static io.trino.plugin.iceberg.IcebergTypes.convertIcebergValueToTrino;
@@ -63,8 +65,11 @@ public record IcebergStatistics(
     public static class Builder
     {
         private final TypeManager typeManager;
+        // top-level columns with min/max statistics
         private final List<Types.NestedField> columns;
         private final List<io.trino.spi.type.Type> columnTypes;
+        // all fields with null count, NaN count and size statistics, including nested fields
+        private final Set<Integer> columnIds;
 
         private long recordCount;
         private long fileCount;
@@ -77,24 +82,28 @@ public record IcebergStatistics(
         public Builder(
                 List<Types.NestedField> columns,
                 List<io.trino.spi.type.Type> columnTypes,
+                Set<Integer> columnIds,
                 TypeManager typeManager)
         {
             checkArgument(columns.size() == columnTypes.size(), "columns and columnTypes must have the same size");
+            checkArgument(columns.stream().map(Types.NestedField::fieldId).allMatch(columnIds::contains), "columnIds must contain every column");
             this.typeManager = requireNonNull(typeManager, "typeManager is null");
             this.columns = ImmutableList.copyOf(columns);
             this.columnTypes = ImmutableList.copyOf(columnTypes);
+            this.columnIds = ImmutableSet.copyOf(columnIds);
         }
 
+        // Keeps no reference into dataFile, so a container reused for the next entry is safe to pass
         public void acceptDataFile(DataFile dataFile, PartitionSpec partitionSpec)
         {
             fileCount++;
             recordCount += dataFile.recordCount();
             size += dataFile.fileSizeInBytes();
 
-            mergeLongStatistics(columnSizes, dataFile.columnSizes());
-            mergeLongStatistics(nanCounts, dataFile.nanValueCounts());
+            mergeFileStatistics(columnSizes, dataFile.columnSizes());
+            mergeFileStatistics(nanCounts, dataFile.nanValueCounts());
             Map<Integer, Long> nullValueCounts = dataFile.nullValueCounts();
-            mergeLongStatistics(nullCounts, nullValueCounts);
+            mergeFileStatistics(nullCounts, nullValueCounts);
 
             Map<Integer, Optional<String>> identityPartitionValues = getPartitionKeys(dataFile.partition(), partitionSpec);
             for (int columnIndex = 0; columnIndex < columns.size(); columnIndex++) {
@@ -142,7 +151,7 @@ public record IcebergStatistics(
 
         public void merge(Builder other)
         {
-            checkArgument(columns.equals(other.columns), "Cannot merge statistics collected for different columns");
+            checkArgument(columns.equals(other.columns) && columnIds.equals(other.columnIds), "Cannot merge statistics collected for different columns");
             recordCount += other.recordCount;
             fileCount += other.fileCount;
             size += other.size;
@@ -202,11 +211,21 @@ public record IcebergStatistics(
             }
         }
 
-        private static void mergeLongStatistics(Map<Integer, Long> accumulated, Map<Integer, Long> fileStatistics)
+        private void mergeFileStatistics(Map<Integer, Long> accumulated, @Nullable Map<Integer, Long> fileStatistics)
         {
             if (fileStatistics == null) {
                 return;
             }
+            for (Integer fieldId : columnIds) {
+                Long value = fileStatistics.get(fieldId);
+                if (value != null) {
+                    accumulated.merge(fieldId, value, Long::sum);
+                }
+            }
+        }
+
+        private static void mergeLongStatistics(Map<Integer, Long> accumulated, Map<Integer, Long> fileStatistics)
+        {
             for (Entry<Integer, Long> entry : fileStatistics.entrySet()) {
                 Long value = entry.getValue();
                 if (value != null) {

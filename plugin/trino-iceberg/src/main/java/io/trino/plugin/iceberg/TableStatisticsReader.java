@@ -188,12 +188,12 @@ public final class TableStatisticsReader
         }
         List<Types.NestedField> columns = columnsBuilder.build();
         List<Type> columnTypes = columnTypesBuilder.build();
-        IcebergStatistics.Builder icebergStatisticsBuilder = new IcebergStatistics.Builder(columns, columnTypes, typeManager);
+        IcebergStatistics.Builder icebergStatisticsBuilder = new IcebergStatistics.Builder(columns, columnTypes, columnIds, typeManager);
 
         // Decode small manifest sets inline to avoid bottlenecking small scans on resource contention in the shared planning pool
         if (filteredManifests.size() < INLINE_MANIFEST_DECODE_THRESHOLD) {
             for (ManifestFile manifestFile : filteredManifests) {
-                collectManifestStatistics(icebergStatisticsBuilder, icebergTable, manifestFile, filter, columnIds, partitionDomain, pathDomain);
+                collectManifestStatistics(icebergStatisticsBuilder, icebergTable, manifestFile, filter, partitionDomain, pathDomain);
             }
         }
         else {
@@ -202,8 +202,8 @@ public final class TableStatisticsReader
             // are not retained after merging, so memory usage stays independent of the number of data files.
             List<Callable<Void>> tasks = filteredManifests.stream()
                     .map(manifestFile -> (Callable<Void>) () -> {
-                        IcebergStatistics.Builder statisticsBuilder = new IcebergStatistics.Builder(columns, columnTypes, typeManager);
-                        collectManifestStatistics(statisticsBuilder, icebergTable, manifestFile, filter, columnIds, partitionDomain, pathDomain);
+                        IcebergStatistics.Builder statisticsBuilder = new IcebergStatistics.Builder(columns, columnTypes, columnIds, typeManager);
+                        collectManifestStatistics(statisticsBuilder, icebergTable, manifestFile, filter, partitionDomain, pathDomain);
                         synchronized (icebergStatisticsBuilder) {
                             icebergStatisticsBuilder.merge(statisticsBuilder);
                         }
@@ -373,11 +373,11 @@ public final class TableStatisticsReader
             Table icebergTable,
             ManifestFile manifestFile,
             Expression filter,
-            Set<Integer> columnIds,
             Domain partitionDomain,
             Domain pathDomain)
     {
-        try (CloseableIterable<DataFile> dataFiles = readManifest(icebergTable, manifestFile, filter, columnIds)) {
+        try (CloseableIterable<DataFile> dataFiles = readManifest(icebergTable, manifestFile, filter)) {
+            // Each data file is fully consumed before the next one is decoded into the same container
             for (DataFile dataFile : dataFiles) {
                 PartitionSpec spec = icebergTable.specs().get(dataFile.specId());
                 if (!partitionDomain.isAll() && !partitionDomain.includesNullableValue(utf8Slice(spec.partitionToPath(dataFile.partition())))) {
@@ -396,22 +396,20 @@ public final class TableStatisticsReader
         }
     }
 
-    private static CloseableIterable<DataFile> readManifest(Table icebergTable, ManifestFile manifestFile, Expression filter, Set<Integer> columnIds)
+    private static CloseableIterable<DataFile> readManifest(Table icebergTable, ManifestFile manifestFile, Expression filter)
     {
-        return CloseableIterable.transform(
-                liveEntries(
-                        ManifestFiles.read(manifestFile, icebergTable.io(), icebergTable.specs())
-                                .select(ImmutableSet.of(
-                                        "partition",
-                                        "file_path",
-                                        "column_sizes",
-                                        "value_counts",
-                                        "null_value_counts",
-                                        "nan_value_counts",
-                                        "lower_bounds",
-                                        "upper_bounds",
-                                        "record_count"))
-                                .filterRows(filter)),
-                dataFile -> dataFile.copyWithStats(columnIds));
+        return liveEntries(
+                ManifestFiles.read(manifestFile, icebergTable.io(), icebergTable.specs())
+                        .select(ImmutableSet.of(
+                                "partition",
+                                "file_path",
+                                "column_sizes",
+                                "value_counts",
+                                "null_value_counts",
+                                "nan_value_counts",
+                                "lower_bounds",
+                                "upper_bounds",
+                                "record_count"))
+                        .filterRows(filter));
     }
 }

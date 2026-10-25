@@ -30,7 +30,8 @@ public class IcebergManifestUtils
         return ManifestLists.read(fileIO.newInputFile(manifestListLocation));
     }
 
-    public static <F extends ContentFile<F>> CloseableIterable<ContentFile<F>> liveEntries(ManifestReader<F> manifestReader)
+    // Yields files that share one reused container, so each file must be fully consumed before the next is read
+    public static <F extends ContentFile<F>> CloseableIterable<F> liveEntries(ManifestReader<F> manifestReader)
     {
         return CloseableIterable.transform(manifestReader.liveEntries(), ManifestEntry::file);
     }
