@@ -137,13 +137,15 @@ public final class SortedRangeSet
         if (inclusive.length != sortedRanges.getPositionCount()) {
             throw new IllegalArgumentException(format("Size mismatch between inclusive markers and sortedRanges block: %s, %s", inclusive.length, sortedRanges.getPositionCount()));
         }
-        for (int position = 0; position < sortedRanges.getPositionCount(); position++) {
-            if (sortedRanges.isNull(position)) {
-                if (inclusive[position]) {
-                    throw new IllegalArgumentException("Invalid inclusive marker for null value at position " + position);
-                }
-                if (position != 0 && position != sortedRanges.getPositionCount() - 1) {
-                    throw new IllegalArgumentException(format("Invalid null value at position %s of %s", position, sortedRanges.getPositionCount()));
+        if (sortedRanges.mayHaveNull()) {
+            for (int position = 0; position < sortedRanges.getPositionCount(); position++) {
+                if (sortedRanges.isNull(position)) {
+                    if (inclusive[position]) {
+                        throw new IllegalArgumentException("Invalid inclusive marker for null value at position " + position);
+                    }
+                    if (position != 0 && position != sortedRanges.getPositionCount() - 1) {
+                        throw new IllegalArgumentException(format("Invalid null value at position %s of %s", position, sortedRanges.getPositionCount()));
+                    }
                 }
             }
         }
