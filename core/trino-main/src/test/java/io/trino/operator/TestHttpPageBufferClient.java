@@ -17,6 +17,7 @@ import com.google.common.collect.ImmutableListMultimap;
 import io.airlift.http.client.HttpStatus;
 import io.airlift.http.client.Request;
 import io.airlift.http.client.Response;
+import io.airlift.http.client.ResponseTooLargeException;
 import io.airlift.http.client.testing.TestingHttpClient;
 import io.airlift.http.client.testing.TestingResponse;
 import io.airlift.slice.Slice;
@@ -432,6 +433,41 @@ public class TestHttpPageBufferClient
         assertThat(callback.getFailure()).isInstanceOf(PageTransportTimeoutException.class);
         assertThat(callback.getFailure()).hasMessageContaining(WORKER_NODE_ERROR + " (http://localhost:8080/0 - 3 failures, failure duration 31.00s, total failed request time 31.00s)");
         assertStatus(client, location, "queued", 0, 3, 3, 3, "not scheduled");
+    }
+
+    @Test
+    public void testResponseTooLarge()
+            throws Exception
+    {
+        TestingHttpClient.Processor processor = _ -> {
+            throw new ResponseTooLargeException("Buffering capacity 1024 exceeded");
+        };
+
+        CyclicBarrier requestComplete = new CyclicBarrier(2);
+        TestingClientCallback callback = new TestingClientCallback(requestComplete);
+
+        URI location = URI.create("http://localhost:8080");
+        HttpPageBufferClient client = new HttpPageBufferClient(
+                "localhost",
+                new TestingHttpClient(processor, scheduler),
+                DataIntegrityVerification.ABORT,
+                DataSize.of(10, MEGABYTE),
+                new Duration(30, TimeUnit.SECONDS),
+                true,
+                TASK_ID,
+                location,
+                callback,
+                scheduler,
+                pageBufferClientCallbackExecutor);
+
+        // the first oversized response fails the client without a retry
+        client.scheduleRequest();
+        requestComplete.await(10, TimeUnit.SECONDS);
+        assertThat(callback.getPages()).isEmpty();
+        assertThat(callback.getCompletedRequests()).isEqualTo(1);
+        assertThat(callback.getFailedBuffers()).isEqualTo(1);
+        assertThat(callback.getFailure()).isInstanceOf(PageTooLargeException.class);
+        assertStatus(client, location, "queued", 0, 1, 1, 1, "not scheduled");
     }
 
     @Test
