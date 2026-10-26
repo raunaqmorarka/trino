@@ -177,7 +177,6 @@ import static io.airlift.http.server.ServerFeature.VIRTUAL_THREADS;
 import static io.airlift.jaxrs.JaxrsBinder.jaxrsBinder;
 import static io.airlift.json.JsonBinder.jsonBinder;
 import static io.airlift.json.JsonCodecBinder.jsonCodecBinder;
-import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static io.trino.operator.RetryPolicy.TASK;
 import static io.trino.server.InternalCommunicationHttpClientModule.internalHttpClientModule;
 import static java.util.Objects.requireNonNull;
@@ -339,9 +338,8 @@ public class ServerMainModule
                 .withConfigDefaults(config -> {
                     config.setIdleTimeout(new Duration(30, SECONDS));
                     config.setRequestTimeout(new Duration(10, SECONDS));
-                    // Bumping the default limit to allow large rows to be transferred between nodes
-                    // 64MB is chosen based on real world experience of using this value in production clusters
-                    config.setMaxResponseContentLength(DataSize.of(64, MEGABYTE));
+                    // Responses are decoded as they arrive and capped at the requested size, so admit pages of any size
+                    config.setMaxResponseContentLength(DataSize.ofBytes(Integer.MAX_VALUE));
                     config.setMaxRequestsQueuedPerDestination(65536);
                     if (internalCommunicationConfig.isHttp2Enabled()) {
                         // HTTP/2 requires fewer connections thanks to multiplexing
