@@ -30,6 +30,7 @@ import io.airlift.http.client.Request;
 import io.airlift.http.client.Response;
 import io.airlift.http.client.ResponseHandler;
 import io.airlift.http.client.ResponseMetadata;
+import io.airlift.http.client.ResponseTooLargeException;
 import io.airlift.http.client.StatusResponseHandler.StatusResponse;
 import io.airlift.http.client.StreamingResponseHandler;
 import io.airlift.log.Logger;
@@ -67,7 +68,6 @@ import java.util.concurrent.atomic.AtomicLong;
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Strings.isNullOrEmpty;
-import static com.google.common.base.Strings.nullToEmpty;
 import static io.airlift.http.client.HeaderNames.CONTENT_TYPE;
 import static io.airlift.http.client.HttpStatus.NO_CONTENT;
 import static io.airlift.http.client.HttpStatus.familyForStatusCode;
@@ -646,7 +646,7 @@ public final class HttpPageBufferClient
     private static Throwable rewriteException(Throwable t)
     {
         if (Throwables.getCausalChain(t).stream()
-                .anyMatch(e -> nullToEmpty(e.getMessage()).contains("exceeded maximum length"))) {
+                .anyMatch(ResponseTooLargeException.class::isInstance)) {
             PageTooLargeException pageTooLargeException = new PageTooLargeException();
             pageTooLargeException.addSuppressed(t);
             return pageTooLargeException;

@@ -24,6 +24,7 @@ import java.util.function.Consumer;
 
 import static io.trino.SystemSessionProperties.EXCHANGE_COMPRESSION_CODEC;
 import static io.trino.plugin.tpch.TpchMetadata.TINY_SCHEMA_NAME;
+import static io.trino.spi.StandardErrorCode.PAGE_TOO_LARGE;
 import static io.trino.testing.TestingSession.testSessionBuilder;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -67,6 +68,17 @@ final class TestLargeSingleRow
         try (QueryAssertions assertions = new QueryAssertions(createQueryRunner(_ -> {}))) {
             assertThat(assertions.query(LARGE_ROW_QUERY))
                     .succeeds();
+        }
+    }
+
+    @Test
+    void testLargeRowExceedsExchangeResponseLimit()
+    {
+        try (QueryAssertions assertions = new QueryAssertions(createQueryRunner(builder ->
+                builder.addProperty("exchange.http-client.max-response-content-length", "1MB")))) {
+            assertThat(assertions.query(LARGE_ROW_QUERY))
+                    .failure()
+                    .hasErrorCode(PAGE_TOO_LARGE);
         }
     }
 
