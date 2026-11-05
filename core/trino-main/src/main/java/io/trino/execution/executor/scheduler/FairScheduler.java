@@ -20,7 +20,9 @@ import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.errorprone.annotations.ThreadSafe;
 import io.airlift.concurrent.ThreadPoolExecutorMBean;
+import jdk.management.VirtualThreadSchedulerMXBean;
 
+import java.lang.management.ManagementFactory;
 import java.util.Set;
 import java.util.StringJoiner;
 import java.util.concurrent.ExecutorService;
@@ -112,19 +114,10 @@ public final class FairScheduler
         taskExecutor = MoreExecutors.listeningDecorator(executorService);
     }
 
-    /// Returns the parallelism of the default virtual thread scheduler, computed the same way as the JDK.
+    /// Returns the parallelism of the default virtual thread scheduler.
     public static int virtualThreadCarriers()
     {
-        int parallelism = Runtime.getRuntime().availableProcessors();
-        String parallelismValue = System.getProperty("jdk.virtualThreadScheduler.parallelism");
-        if (parallelismValue != null) {
-            parallelism = Integer.parseInt(parallelismValue);
-        }
-        String maxPoolSizeValue = System.getProperty("jdk.virtualThreadScheduler.maxPoolSize");
-        if (maxPoolSizeValue != null) {
-            parallelism = min(parallelism, Integer.parseInt(maxPoolSizeValue));
-        }
-        return parallelism;
+        return ManagementFactory.getPlatformMXBean(VirtualThreadSchedulerMXBean.class).getParallelism();
     }
 
     private static ThreadFactory threadFactory(String threadNameFormat, boolean virtualThreadsEnabled)

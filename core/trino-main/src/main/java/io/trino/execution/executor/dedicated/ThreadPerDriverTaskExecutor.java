@@ -40,9 +40,11 @@ import io.trino.execution.executor.scheduler.FairScheduler;
 import io.trino.spi.VersionEmbedder;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
+import jdk.management.VirtualThreadSchedulerMXBean;
 import org.weakref.jmx.Managed;
 import org.weakref.jmx.Nested;
 
+import java.lang.management.ManagementFactory;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
@@ -135,18 +137,32 @@ public class ThreadPerDriverTaskExecutor
         if (!config.isThreadPerDriverSchedulerVirtualThreadsEnabled()) {
             return false;
         }
+        try {
+            VirtualThreadTime.initialize();
+        }
+        catch (UnsupportedOperationException e) {
+            LOG.warn(e, "Running splits on platform threads because virtual thread CPU timing is not supported. Set experimental.thread-per-driver-scheduler-virtual-threads-enabled=false to silence this warning.");
+            return false;
+        }
+        addDriverCarriers(config.getMaxWorkerThreads());
         int carriers = FairScheduler.virtualThreadCarriers();
         if (carriers < 2) {
             LOG.warn("Running splits on platform threads because virtual threads need at least two carrier threads, but there are %s. Set experimental.thread-per-driver-scheduler-virtual-threads-enabled=false to silence this warning.", carriers);
             return false;
         }
-        try {
-            VirtualThreadTime.initialize();
-            return true;
+        return true;
+    }
+
+    /// Adds a carrier per worker thread to the JDK default, unless the deployment sets the virtual thread parallelism.
+    private static void addDriverCarriers(int maxWorkerThreads)
+    {
+        if (System.getProperty("jdk.virtualThreadScheduler.parallelism") != null) {
+            return;
         }
-        catch (UnsupportedOperationException e) {
-            LOG.warn(e, "Running splits on platform threads because virtual thread CPU timing is not supported. Set experimental.thread-per-driver-scheduler-virtual-threads-enabled=false to silence this warning.");
-            return false;
+        VirtualThreadSchedulerMXBean scheduler = ManagementFactory.getPlatformMXBean(VirtualThreadSchedulerMXBean.class);
+        int carriers = Runtime.getRuntime().availableProcessors() + maxWorkerThreads;
+        if (carriers > scheduler.getParallelism()) {
+            scheduler.setParallelism(carriers);
         }
     }
 
