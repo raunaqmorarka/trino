@@ -13,6 +13,7 @@
  */
 package io.trino.server;
 
+import com.fasterxml.jackson.annotation.JsonView;
 import com.google.common.collect.ImmutableList;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
@@ -35,6 +36,7 @@ import io.trino.execution.TaskStatus;
 import io.trino.execution.buffer.BufferResult;
 import io.trino.execution.buffer.PipelinedOutputBuffers;
 import io.trino.metadata.SessionPropertyManager;
+import io.trino.plugin.base.metrics.TDigestHistogram;
 import io.trino.server.security.ResourceSecurity;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
@@ -143,6 +145,7 @@ public class TaskResource
     @Path("{taskId}")
     @Consumes(MediaType.APPLICATION_JSON)
     @Produces(MediaType.APPLICATION_JSON)
+    @JsonView(TDigestHistogram.DigestOnly.class)
     public void createOrUpdateTask(
             @PathParam("taskId") TaskId taskId,
             TaskUpdateRequest taskUpdateRequest,
@@ -181,6 +184,7 @@ public class TaskResource
     @GET
     @Path("{taskId}")
     @Produces(MediaType.APPLICATION_JSON)
+    @JsonView(TDigestHistogram.DigestOnly.class)
     public void getTaskInfo(
             @PathParam("taskId") TaskId taskId,
             @HeaderParam(TRINO_CURRENT_VERSION) Long currentVersion,
@@ -294,6 +298,7 @@ public class TaskResource
     @DELETE
     @Path("{taskId}")
     @Produces(MediaType.APPLICATION_JSON)
+    @JsonView(TDigestHistogram.DigestOnly.class)
     public TaskInfo deleteTask(
             @PathParam("taskId") TaskId taskId,
             @QueryParam("abort") @DefaultValue("true") boolean abort,
@@ -319,6 +324,7 @@ public class TaskResource
     @Path("{taskId}/fail")
     @Consumes(MediaType.APPLICATION_JSON)
     @Produces(MediaType.APPLICATION_JSON)
+    @JsonView(TDigestHistogram.DigestOnly.class)
     public TaskInfo failTask(
             @PathParam("taskId") TaskId taskId,
             FailTaskRequest failTaskRequest)

@@ -15,8 +15,12 @@
 package io.trino.plugin.base.metrics;
 
 import com.fasterxml.jackson.core.Base64Variants;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.json.JsonCodec;
+import io.airlift.json.JsonMapperProvider;
 import io.airlift.stats.TDigest;
 import io.airlift.units.Duration;
 import io.trino.spi.metrics.Metric;
@@ -100,6 +104,26 @@ public class TestMetrics
         // same text as Jackson's byte[] encoding of the digest
         assertThat(mapJsonCodec(String.class, Object.class).fromJson(json).get("digest"))
                 .isEqualTo(Base64Variants.MIME_NO_LINEFEEDS.encode(digest.serialize().getBytes()));
+    }
+
+    @Test
+    public void testHistogramJsonDigestOnlyView()
+            throws Exception
+    {
+        JsonMapper mapper = new JsonMapperProvider().get();
+        TDigest digest = new TDigest();
+        digest.add(123);
+        Metrics metrics = new Metrics(ImmutableMap.of("a", new TDigestHistogram(digest)));
+
+        JsonNode histogramJson = mapper.readTree(mapper.writeValueAsString(metrics)).get("a");
+        assertThat(ImmutableList.copyOf(histogramJson.fieldNames()))
+                .contains("digest", "total", "min", "max", "p01", "p50", "p99");
+
+        String digestOnlyJson = mapper.writerWithView(TDigestHistogram.DigestOnly.class).writeValueAsString(metrics);
+        assertThat(ImmutableList.copyOf(mapper.readTree(digestOnlyJson).get("a").fieldNames()))
+                .containsExactlyInAnyOrder("@class", "digest");
+        TDigestHistogram result = (TDigestHistogram) jsonCodec(Metrics.class).fromJson(digestOnlyJson).getMetrics().get("a");
+        assertThat(result.getDigest().serialize()).isEqualTo(digest.serialize());
     }
 
     @Test
