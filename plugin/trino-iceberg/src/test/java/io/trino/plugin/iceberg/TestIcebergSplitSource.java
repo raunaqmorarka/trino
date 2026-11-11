@@ -200,12 +200,46 @@ public class TestIcebergSplitSource
         IcebergColumnHandle regionKey = IcebergColumnHandle.optional(new ColumnIdentity(3, "regionkey", ColumnIdentity.TypeCategory.PRIMITIVE, ImmutableList.of()))
                 .columnType(BIGINT)
                 .build();
-        // Stats for regionKey are included when it's in dynamicFilterColumns, even when the per-batch predicate has not yet resolved
-        split = generateSplit(SESSION, nationTable, tableHandle, ImmutableSet.of(regionKey), DynamicFilterSnapshot.EMPTY);
+        // Stats for regionKey are included while the dynamic filter is incomplete
+        split = generateSplit(SESSION, nationTable, tableHandle, ImmutableSet.of(regionKey), new DynamicFilterSnapshot(TupleDomain.all(), false));
         assertThat(split.fileStatisticsDomain()).isEqualTo(TupleDomain.withColumnDomains(
                 ImmutableMap.of(
                         nationKey, Domain.create(ValueSet.ofRanges(Range.range(BIGINT, 0L, true, 24L, true)), false),
                         regionKey, Domain.create(ValueSet.ofRanges(Range.range(BIGINT, 0L, true, 4L, true)), false))));
+
+        TupleDomain<IcebergColumnHandle> nationKeyStatistics = TupleDomain.withColumnDomains(
+                ImmutableMap.of(nationKey, Domain.create(ValueSet.ofRanges(Range.range(BIGINT, 0L, true, 24L, true)), false)));
+        // Stats for regionKey are omitted once the dynamic filter is complete
+        split = generateSplit(SESSION, nationTable, tableHandle, ImmutableSet.of(regionKey), DynamicFilterSnapshot.EMPTY);
+        assertThat(split.fileStatisticsDomain()).isEqualTo(nationKeyStatistics);
+        TupleDomain<ColumnHandle> regionKeyValues = TupleDomain.withColumnDomains(ImmutableMap.of(regionKey, multipleValues(LongStream.rangeClosed(0, 300))));
+        split = generateSplit(SESSION, nationTable, tableHandle, ImmutableSet.of(regionKey), new DynamicFilterSnapshot(regionKeyValues, true));
+        assertThat(split.fileStatisticsDomain()).isEqualTo(nationKeyStatistics);
+    }
+
+    @Test
+    public void testFileStatisticsDomainOmitsIdentityPartitionColumns()
+            throws Exception
+    {
+        String tableName = "test_file_statistics_identity_partition";
+        assertUpdate("CREATE TABLE " + tableName + " WITH (partitioning = ARRAY['part']) AS SELECT BIGINT '1' key, BIGINT '2' part", 1);
+        try {
+            SchemaTableName schemaTableName = new SchemaTableName("tpch", tableName);
+            Table table = catalog.loadTable(SESSION, schemaTableName);
+            IcebergColumnHandle key = IcebergColumnHandle.optional(new ColumnIdentity(1, "key", ColumnIdentity.TypeCategory.PRIMITIVE, ImmutableList.of()))
+                    .columnType(BIGINT)
+                    .build();
+            IcebergColumnHandle part = IcebergColumnHandle.optional(new ColumnIdentity(2, "part", ColumnIdentity.TypeCategory.PRIMITIVE, ImmutableList.of()))
+                    .columnType(BIGINT)
+                    .build();
+            IcebergTableHandle tableHandle = createTableHandle(schemaTableName, table, TupleDomain.withColumnDomains(ImmutableMap.of(key, Domain.notNull(BIGINT), part, Domain.notNull(BIGINT))));
+
+            assertThat(generateSplit(table, tableHandle).fileStatisticsDomain()).isEqualTo(TupleDomain.withColumnDomains(
+                    ImmutableMap.of(key, Domain.create(ValueSet.ofRanges(Range.equal(BIGINT, 1L)), false))));
+        }
+        finally {
+            assertUpdate("DROP TABLE " + tableName);
+        }
     }
 
     @Test
