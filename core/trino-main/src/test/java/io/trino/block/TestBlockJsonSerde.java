@@ -21,7 +21,10 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.json.JsonMapperProvider;
 import io.airlift.slice.DynamicSliceOutput;
+import io.airlift.slice.SliceInput;
+import io.airlift.slice.SliceOutput;
 import io.trino.spi.block.Block;
+import io.trino.spi.block.BlockEncodingSerde;
 import io.trino.spi.type.Type;
 import org.junit.jupiter.api.Test;
 
@@ -96,6 +99,23 @@ public class TestBlockJsonSerde
     }
 
     @Test
+    public void testSizeEstimateBelowEncodedSize()
+            throws Exception
+    {
+        JsonMapper mapper = new JsonMapperProvider()
+                .withJsonSerializers(ImmutableMap.of(Block.class, new BlockJsonSerde.Serializer(new ZeroEstimateBlockEncodingSerde())))
+                .get();
+        for (int length = 0; length < 10; length++) {
+            Block block = createStringsBlock("x".repeat(length));
+            assertThat(mapper.writeValueAsString(block)).isEqualTo(MAPPER.writeValueAsString(block));
+        }
+        Block block = createLongsBlock(LongStream.range(0, 10_000).boxed().collect(toImmutableList()));
+        String json = mapper.writeValueAsString(block);
+        assertThat(json).isEqualTo(MAPPER.writeValueAsString(block));
+        assertBlockEquals(BIGINT, MAPPER.readValue(json, Block.class), block);
+    }
+
+    @Test
     public void testRejectNonAsciiCharacter()
             throws Exception
     {
@@ -137,6 +157,40 @@ public class TestBlockJsonSerde
         assertBlockEquals(type, MAPPER.readValue(json, Block.class), block);
         assertBlockEquals(type, MAPPER.readValue(new String(json, UTF_8), Block.class), block);
         assertBlockEquals(type, MAPPER.readValue(MAPPER.writeValueAsString(block), Block.class), block);
+    }
+
+    private static class ZeroEstimateBlockEncodingSerde
+            implements BlockEncodingSerde
+    {
+        @Override
+        public Block readBlock(SliceInput input)
+        {
+            return TESTING_BLOCK_ENCODING_SERDE.readBlock(input);
+        }
+
+        @Override
+        public void writeBlock(SliceOutput output, Block block)
+        {
+            TESTING_BLOCK_ENCODING_SERDE.writeBlock(output, block);
+        }
+
+        @Override
+        public long estimatedWriteSize(Block block)
+        {
+            return 0;
+        }
+
+        @Override
+        public Type readType(SliceInput sliceInput)
+        {
+            return TESTING_BLOCK_ENCODING_SERDE.readType(sliceInput);
+        }
+
+        @Override
+        public void writeType(SliceOutput sliceOutput, Type type)
+        {
+            TESTING_BLOCK_ENCODING_SERDE.writeType(sliceOutput, type);
+        }
     }
 
     public record Holder(String name, Block block, int count)

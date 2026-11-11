@@ -40,6 +40,7 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static io.trino.block.BlockSerdeUtil.readBlock;
 import static io.trino.block.BlockSerdeUtil.writeBlock;
+import static java.lang.Math.max;
 import static java.lang.Math.min;
 import static java.lang.Math.toIntExact;
 import static java.util.Objects.checkFromIndexSize;
@@ -50,6 +51,8 @@ public final class BlockJsonSerde
     // 3 KB of bytes encode to exactly 4 KB of base64 text
     private static final int DECODED_CHUNK_SIZE = 3 * 1024;
     private static final int ENCODED_CHUNK_SIZE = 4 * 1024;
+    // smallest buffer OutputStreamSliceOutput accepts
+    private static final int OUTPUT_BUFFER_SIZE = 1024;
 
     private BlockJsonSerde() {}
 
@@ -68,8 +71,9 @@ public final class BlockJsonSerde
         public void serialize(Block block, JsonGenerator jsonGenerator, SerializerProvider serializerProvider)
                 throws IOException
         {
-            DynamicSliceOutput base64 = new DynamicSliceOutput(toIntExact((blockEncodingSerde.estimatedWriteSize(block) + 2) / 3 * 4));
-            try (SliceOutput output = new OutputStreamSliceOutput(new Base64EncodingOutputStream(base64))) {
+            long estimatedSize = blockEncodingSerde.estimatedWriteSize(block);
+            DynamicSliceOutput base64 = new DynamicSliceOutput(toIntExact((estimatedSize + 2) / 3 * 4));
+            try (SliceOutput output = new OutputStreamSliceOutput(new Base64EncodingOutputStream(base64, estimatedSize), OUTPUT_BUFFER_SIZE)) {
                 writeBlock(blockEncodingSerde, output, block);
             }
             Slice text = base64.slice();
@@ -108,19 +112,23 @@ public final class BlockJsonSerde
     }
 
     /**
-     * Encodes bytes to base64 in fixed size chunks, since the JDK codec encodes whole arrays in bulk.
+     * Encodes bytes to base64 in bounded size chunks, since the JDK codec encodes whole arrays in bulk.
      */
     private static final class Base64EncodingOutputStream
             extends OutputStream
     {
         private final SliceOutput output;
-        private final byte[] chunk = new byte[DECODED_CHUNK_SIZE];
-        private final byte[] encodedChunk = new byte[ENCODED_CHUNK_SIZE];
+        private final byte[] chunk;
+        private final byte[] encodedChunk;
         private int chunkSize;
 
-        private Base64EncodingOutputStream(SliceOutput output)
+        private Base64EncodingOutputStream(SliceOutput output, long estimatedSize)
         {
             this.output = requireNonNull(output, "output is null");
+            // whole 3 byte groups keep padding out of all but the last chunk
+            int chunkLength = toIntExact(min(DECODED_CHUNK_SIZE, max(3, (estimatedSize + 2) / 3 * 3)));
+            this.chunk = new byte[chunkLength];
+            this.encodedChunk = new byte[chunkLength / 3 * 4];
         }
 
         @Override
@@ -165,14 +173,14 @@ public final class BlockJsonSerde
     }
 
     /**
-     * Decodes base64 text in fixed size chunks, since the JDK codec decodes whole arrays in bulk.
+     * Decodes base64 text in bounded size chunks, since the JDK codec decodes whole arrays in bulk.
      */
     private static final class Base64DecodingWriter
             extends Writer
     {
         private final byte[] decoded;
-        private final byte[] chunk = new byte[ENCODED_CHUNK_SIZE];
-        private final byte[] decodedChunk = new byte[DECODED_CHUNK_SIZE];
+        private final byte[] chunk;
+        private final byte[] decodedChunk;
         private int remaining;
         private int chunkSize;
         private int decodedSize;
@@ -181,6 +189,9 @@ public final class BlockJsonSerde
         {
             this.remaining = length;
             this.decoded = new byte[toIntExact((length + 3L) / 4 * 3)];
+            int chunkLength = toIntExact(min(ENCODED_CHUNK_SIZE, (length + 3L) / 4 * 4));
+            this.chunk = new byte[chunkLength];
+            this.decodedChunk = new byte[chunkLength / 4 * 3];
         }
 
         @Override
