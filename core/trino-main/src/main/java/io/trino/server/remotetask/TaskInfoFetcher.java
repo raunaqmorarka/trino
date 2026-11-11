@@ -150,6 +150,8 @@ public class TaskInfoFetcher
             return;
         }
         running = true;
+        // The task update that starts the task returns its info
+        lastUpdateNanos.set(System.nanoTime());
         scheduleUpdate();
     }
 
@@ -257,6 +259,15 @@ public class TaskInfoFetcher
     synchronized void updateTaskInfo(TaskInfo newTaskInfo)
     {
         updateTaskInfo(newTaskInfo, isTaskInstanceMismatch(newTaskInfo));
+    }
+
+    /**
+     * Applies the task info returned by a task update and postpones the next fetch.
+     */
+    synchronized void updateTaskInfoFromTaskUpdate(TaskInfo newTaskInfo)
+    {
+        lastUpdateNanos.set(System.nanoTime());
+        updateTaskInfo(newTaskInfo);
     }
 
     private synchronized void updateTaskInfo(TaskInfo newTaskInfo, boolean taskInstanceMismatch)
