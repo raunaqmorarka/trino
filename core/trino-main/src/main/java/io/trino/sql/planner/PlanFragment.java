@@ -217,11 +217,9 @@ public class PlanFragment
         return jsonRepresentation;
     }
 
-    public PlanFragment withoutEmbeddedJsonRepresentation()
+    // Workers use neither the JSON representation nor the stats and costs
+    public PlanFragment withoutCoordinatorOnlyFields()
     {
-        if (jsonRepresentation.isEmpty()) {
-            return this;
-        }
         return new PlanFragment(
                 this.id,
                 this.root,
@@ -234,7 +232,7 @@ public class PlanFragment
                 this.remoteSourceNodes,
                 this.outputPartitioningScheme,
                 this.outputSkewedBucketCount,
-                this.statsAndCosts,
+                StatsAndCosts.empty(),
                 this.activeCatalogs,
                 this.languageFunctions,
                 Optional.empty());
