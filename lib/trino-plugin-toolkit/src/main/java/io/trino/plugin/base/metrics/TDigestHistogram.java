@@ -16,6 +16,7 @@ package io.trino.plugin.base.metrics;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
+import com.fasterxml.jackson.annotation.JsonView;
 import com.google.common.base.MoreObjects.ToStringHelper;
 import com.google.errorprone.annotations.DoNotCall;
 import io.airlift.stats.TDigest;
@@ -37,6 +38,12 @@ public class TDigestHistogram
     // This is important so that we can instruct Jackson to ignore this property
     // in certain places (e.g. UiQueryResource)
     public static final String DIGEST_PROPERTY = "digest";
+
+    // JSON view of the properties derived from the digest
+    public interface Summary {}
+
+    // JSON view that writes the digest without the derived properties
+    public interface DigestOnly {}
 
     private final TDigest digest;
 
@@ -110,6 +117,7 @@ public class TDigestHistogram
 
     @Override
     @JsonProperty
+    @JsonView(Summary.class)
     public synchronized long getTotal()
     {
         return (long) digest.getCount();
@@ -117,6 +125,7 @@ public class TDigestHistogram
 
     @Override
     @JsonProperty
+    @JsonView(Summary.class)
     public synchronized double getMin()
     {
         return digest.getMin();
@@ -124,6 +133,7 @@ public class TDigestHistogram
 
     @Override
     @JsonProperty
+    @JsonView(Summary.class)
     public synchronized double getMax()
     {
         return digest.getMax();
@@ -132,54 +142,63 @@ public class TDigestHistogram
     // Below are extra properties that make it easy to read and parse serialized distribution
     // in operator summaries and event listener.
     @JsonProperty
+    @JsonView(Summary.class)
     public synchronized double getP01()
     {
         return digest.valueAt(0.01);
     }
 
     @JsonProperty
+    @JsonView(Summary.class)
     public synchronized double getP05()
     {
         return digest.valueAt(0.05);
     }
 
     @JsonProperty
+    @JsonView(Summary.class)
     public synchronized double getP10()
     {
         return digest.valueAt(0.10);
     }
 
     @JsonProperty
+    @JsonView(Summary.class)
     public synchronized double getP25()
     {
         return digest.valueAt(0.25);
     }
 
     @JsonProperty
+    @JsonView(Summary.class)
     public synchronized double getP50()
     {
         return digest.valueAt(0.50);
     }
 
     @JsonProperty
+    @JsonView(Summary.class)
     public synchronized double getP75()
     {
         return digest.valueAt(0.75);
     }
 
     @JsonProperty
+    @JsonView(Summary.class)
     public synchronized double getP90()
     {
         return digest.valueAt(0.90);
     }
 
     @JsonProperty
+    @JsonView(Summary.class)
     public synchronized double getP95()
     {
         return digest.valueAt(0.95);
     }
 
     @JsonProperty
+    @JsonView(Summary.class)
     public synchronized double getP99()
     {
         return digest.valueAt(0.99);
