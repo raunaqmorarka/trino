@@ -15,10 +15,12 @@ package io.trino.sql;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Multimap;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
 import io.trino.metadata.Metadata;
+import io.trino.spi.block.Block;
 import io.trino.spi.function.CatalogSchemaFunctionName;
 import io.trino.spi.function.IsNull;
 import io.trino.spi.function.ScalarFunction;
@@ -27,6 +29,7 @@ import io.trino.spi.function.TypeParameter;
 import io.trino.spi.predicate.Domain;
 import io.trino.spi.predicate.FloatingPointValueSet;
 import io.trino.spi.predicate.Range;
+import io.trino.spi.predicate.SortedRangeSet;
 import io.trino.spi.predicate.ValueSet;
 import io.trino.spi.type.BooleanType;
 import io.trino.spi.type.Type;
@@ -45,14 +48,20 @@ import io.trino.type.CharVarcharCoercion;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableListMultimap.toImmutableListMultimap;
 import static io.trino.metadata.GlobalFunctionCatalog.builtinFunctionName;
+import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.DateType.DATE;
+import static io.trino.spi.type.IntegerType.INTEGER;
+import static io.trino.spi.type.SmallintType.SMALLINT;
 import static io.trino.spi.type.StandardTypes.BOOLEAN;
 import static io.trino.spi.type.StandardTypes.VARCHAR;
+import static io.trino.spi.type.TinyintType.TINYINT;
 import static io.trino.sql.ir.Booleans.FALSE;
 import static io.trino.sql.ir.Booleans.TRUE;
 import static io.trino.sql.ir.ComparisonOperator.EQUAL;
@@ -61,6 +70,8 @@ import static java.util.Objects.requireNonNull;
 
 public final class DynamicFilters
 {
+    private static final Set<Type> CONSECUTIVE_VALUE_TYPES = ImmutableSet.of(BIGINT, INTEGER, SMALLINT, TINYINT, DATE);
+
     private DynamicFilters() {}
 
     public static Expression createDynamicFilterExpression(
@@ -150,6 +161,26 @@ public final class DynamicFilters
                         dynamicFilterFunctionCall.arguments().get(1),
                         new Constant(VarcharType.VARCHAR, Slices.utf8Slice(newId.toString())), // dynamic filter id is the 3rd argument
                         dynamicFilterFunctionCall.arguments().get(3)));
+    }
+
+    // Replaces a discrete set of consecutive values with a single closed range
+    public static Domain collapseConsecutiveValues(Domain domain)
+    {
+        Type type = domain.getType();
+        if (!CONSECUTIVE_VALUE_TYPES.contains(type) || !(domain.getValues() instanceof SortedRangeSet values)) {
+            return domain;
+        }
+        int rangeCount = values.getRangeCount();
+        if (rangeCount < 2 || !values.isDiscreteSet()) {
+            return domain;
+        }
+        Block sortedRanges = values.getSortedRanges();
+        long first = type.getLong(sortedRanges, 0);
+        long last = type.getLong(sortedRanges, 2 * rangeCount - 1);
+        if (last - first != rangeCount - 1) {
+            return domain;
+        }
+        return Domain.create(ValueSet.ofRanges(Range.range(type, first, true, last, true)), domain.isNullAllowed());
     }
 
     public static boolean isDynamicFilter(Expression expression)

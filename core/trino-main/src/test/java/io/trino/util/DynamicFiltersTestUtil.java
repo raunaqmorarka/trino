@@ -64,6 +64,16 @@ public final class DynamicFiltersTestUtil
         else {
             formattedValues = format("{[%d], ..., [%d]}", low, high);
         }
+        return formatSimplifiedDomain(type, rangeCount, formattedValues);
+    }
+
+    public static String getSimplifiedRangeDomainString(long low, long high, Type type)
+    {
+        return formatSimplifiedDomain(type, 1, format("{[%d,%d]}", low, high));
+    }
+
+    private static String formatSimplifiedDomain(Type type, int rangeCount, String formattedValues)
+    {
         return "[ " +
                 new StringJoiner(", ", SortedRangeSet.class.getSimpleName() + "[", "]")
                         .add("type=" + type)

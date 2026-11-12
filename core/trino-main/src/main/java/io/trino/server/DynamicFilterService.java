@@ -91,6 +91,7 @@ import static io.trino.SystemSessionProperties.getRetryPolicy;
 import static io.trino.SystemSessionProperties.isFunctionPreimagesEnabled;
 import static io.trino.spi.connector.DynamicFilter.EMPTY;
 import static io.trino.spi.predicate.Domain.union;
+import static io.trino.sql.DynamicFilters.collapseConsecutiveValues;
 import static io.trino.sql.DynamicFilters.extractDynamicFilters;
 import static io.trino.sql.DynamicFilters.extractSourceSymbols;
 import static io.trino.sql.planner.DomainCoercer.applySaturatedCasts;
@@ -720,7 +721,7 @@ public class DynamicFilterService
                 result = domain;
             }
             collectionDuration.set(Duration.succinctNanos(System.nanoTime() - start));
-            collectedDomainsFuture.set(result);
+            collectedDomainsFuture.set(collapseConsecutiveValues(result));
         }
 
         private void collectPartitioned(TaskId taskId, Domain domain)
@@ -788,7 +789,7 @@ public class DynamicFilterService
             }
 
             collectionDuration.set(Duration.succinctNanos(System.nanoTime() - start));
-            collectedDomainsFuture.set(result);
+            collectedDomainsFuture.set(collapseConsecutiveValues(result));
         }
 
         private void unionSummaryDomainsIfNecessary(boolean force)
@@ -869,7 +870,7 @@ public class DynamicFilterService
             }
 
             collectionDuration.set(Duration.succinctNanos(System.nanoTime() - start));
-            collectedDomainsFuture.set(result);
+            collectedDomainsFuture.set(collapseConsecutiveValues(result));
         }
 
         public ListenableFuture<Domain> getCollectedDomainFuture()

@@ -40,6 +40,7 @@ import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.base.Verify.verify;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
 import static io.trino.spi.predicate.TupleDomain.columnWiseUnion;
+import static io.trino.sql.DynamicFilters.collapseConsecutiveValues;
 import static java.util.Objects.requireNonNull;
 import static java.util.function.Function.identity;
 
@@ -238,7 +239,8 @@ public class LocalDynamicFilterConsumer
                     .collect(toImmutableMap(identity(), filterId -> Domain.none(filterBuildTypes.get(filterId))));
         }
 
-        Map<DynamicFilterId, Domain> domains = new HashMap<>(result.getDomains().get());
+        Map<DynamicFilterId, Domain> domains = new HashMap<>();
+        result.getDomains().get().forEach((filterId, domain) -> domains.put(filterId, collapseConsecutiveValues(domain)));
         // Add `all` domain explicitly for dynamic filters to notify dynamic filter listeners
         buildChannels.keySet().forEach(filterId -> domains.putIfAbsent(filterId, Domain.all(filterBuildTypes.get(filterId))));
         return ImmutableMap.copyOf(domains);
