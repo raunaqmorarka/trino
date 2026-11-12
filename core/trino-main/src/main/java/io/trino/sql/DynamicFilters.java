@@ -66,6 +66,7 @@ import static io.trino.sql.ir.Booleans.FALSE;
 import static io.trino.sql.ir.Booleans.TRUE;
 import static io.trino.sql.ir.ComparisonOperator.EQUAL;
 import static io.trino.sql.ir.IrUtils.extractConjuncts;
+import static java.lang.Math.toIntExact;
 import static java.util.Objects.requireNonNull;
 
 public final class DynamicFilters
@@ -181,6 +182,64 @@ public final class DynamicFilters
             return domain;
         }
         return Domain.create(ValueSet.ofRanges(Range.range(type, first, true, last, true)), domain.isNullAllowed());
+    }
+
+    // Returns a single closed range when the union of discrete sets holds every value between its bounds
+    public static Optional<Domain> unionConsecutiveValues(List<Domain> domains)
+    {
+        Type type = domains.getFirst().getType();
+        if (!CONSECUTIVE_VALUE_TYPES.contains(type)) {
+            return Optional.empty();
+        }
+        long valueCount = 0;
+        long min = Long.MAX_VALUE;
+        long max = Long.MIN_VALUE;
+        boolean nullAllowed = false;
+        for (Domain domain : domains) {
+            if (!(domain.getValues() instanceof SortedRangeSet values)) {
+                return Optional.empty();
+            }
+            nullAllowed |= domain.isNullAllowed();
+            int rangeCount = values.getRangeCount();
+            if (rangeCount == 0) {
+                continue;
+            }
+            if (!values.isDiscreteSet()) {
+                return Optional.empty();
+            }
+            Block sortedRanges = values.getSortedRanges();
+            min = Math.min(min, type.getLong(sortedRanges, 0));
+            max = Math.max(max, type.getLong(sortedRanges, 2 * rangeCount - 1));
+            valueCount += rangeCount;
+        }
+        if (valueCount == 0) {
+            return Optional.empty();
+        }
+        // A negative span means the subtraction overflowed
+        long span = max - min;
+        if (span < 0 || span >= valueCount) {
+            return Optional.empty();
+        }
+
+        long[] bitmap = new long[toIntExact((span >>> 6) + 1)];
+        for (Domain domain : domains) {
+            SortedRangeSet values = (SortedRangeSet) domain.getValues();
+            Block sortedRanges = values.getSortedRanges();
+            for (int position = 0; position < 2 * values.getRangeCount(); position += 2) {
+                long offset = type.getLong(sortedRanges, position) - min;
+                bitmap[(int) (offset >>> 6)] |= 1L << offset;
+            }
+        }
+        int lastWord = bitmap.length - 1;
+        for (int word = 0; word < lastWord; word++) {
+            if (bitmap[word] != -1L) {
+                return Optional.empty();
+            }
+        }
+        if (bitmap[lastWord] != -1L >>> (63 - (span & 63))) {
+            return Optional.empty();
+        }
+        return Optional.of(Domain.create(ValueSet.ofRanges(Range.range(type, min, true, max, true)), nullAllowed));
     }
 
     public static boolean isDynamicFilter(Expression expression)

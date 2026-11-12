@@ -92,6 +92,7 @@ import static io.trino.SystemSessionProperties.isFunctionPreimagesEnabled;
 import static io.trino.spi.connector.DynamicFilter.EMPTY;
 import static io.trino.spi.predicate.Domain.union;
 import static io.trino.sql.DynamicFilters.collapseConsecutiveValues;
+import static io.trino.sql.DynamicFilters.unionConsecutiveValues;
 import static io.trino.sql.DynamicFilters.extractDynamicFilters;
 import static io.trino.sql.DynamicFilters.extractSourceSymbols;
 import static io.trino.sql.planner.DomainCoercer.applySaturatedCasts;
@@ -813,7 +814,8 @@ public class DynamicFilterService
                 return;
             }
 
-            Domain union = union(domains);
+            Domain union = unionConsecutiveValues(domains)
+                    .orElseGet(() -> union(domains));
             // Avoid large unions with domains that exceed size limit
             if ((summaryDomainsRetainedSizeInBytes.get() - domainsRetainedSizeInBytes + union.getRetainedSizeInBytes()) > domainSizeLimitInBytes) {
                 union = union.simplify(1);
