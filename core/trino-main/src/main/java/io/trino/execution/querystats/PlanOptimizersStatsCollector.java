@@ -76,6 +76,11 @@ public class PlanOptimizersStatsCollector
                 .collect(toImmutableList());
     }
 
+    public void clear()
+    {
+        stats.clear();
+    }
+
     public void add(PlanOptimizersStatsCollector other)
     {
         other.stats.forEach((key, value) -> statsForClass(key).merge(value));
