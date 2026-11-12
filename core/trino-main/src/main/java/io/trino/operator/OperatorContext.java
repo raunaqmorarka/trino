@@ -29,7 +29,6 @@ import io.trino.memory.context.LocalMemoryContext;
 import io.trino.memory.context.MemoryTrackingContext;
 import io.trino.operator.OperationTimer.OperationTiming;
 import io.trino.operator.ResourceUsageTimeSeriesRecorder.ResourceUsageTimeSeriesSnapshot;
-import io.trino.plugin.base.metrics.TDigestHistogram;
 import io.trino.plugin.base.util.UncheckedCloser;
 import io.trino.spi.Page;
 import io.trino.spi.TrinoException;
@@ -54,7 +53,6 @@ import static java.lang.Math.max;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
-import static java.util.concurrent.TimeUnit.SECONDS;
 
 /**
  * Contains information about {@link Operator} execution.
@@ -554,12 +552,7 @@ public class OperatorContext
                 outputPositions.get(),
 
                 dynamicFilterSplitsProcessed.get(),
-                getOperatorMetrics(
-                        inputPositionsCount,
-                        new Duration(addInputTiming.getCpuNanos() + getOutputTiming.getCpuNanos() + finishTiming.getCpuNanos(), NANOSECONDS).convertTo(SECONDS).getValue(),
-                        new Duration(addInputTiming.getWallNanos() + getOutputTiming.getWallNanos() + finishTiming.getWallNanos(), NANOSECONDS).convertTo(SECONDS).getValue(),
-                        new Duration(blockedWallNanos.get(), NANOSECONDS).convertTo(SECONDS).getValue(),
-                        cpuTimeSeriesRecorder.snapshot()),
+                getOperatorMetrics(cpuTimeSeriesRecorder.snapshot()),
                 connectorMetrics.get(),
                 Metrics.EMPTY, // will be filled in when aggregating at pipeline level
 
@@ -583,18 +576,9 @@ public class OperatorContext
                 info);
     }
 
-    private Metrics getOperatorMetrics(
-            long inputPositions,
-            double cpuTimeSeconds,
-            double wallTimeSeconds,
-            double blockedWallSeconds,
-            ResourceUsageTimeSeriesSnapshot resourceUsageTimeSeries)
+    private Metrics getOperatorMetrics(ResourceUsageTimeSeriesSnapshot resourceUsageTimeSeries)
     {
         return metrics.get().mergeWith(new Metrics(ImmutableMap.of(
-                "Input rows distribution", TDigestHistogram.fromValue(inputPositions),
-                "CPU time distribution (s)", TDigestHistogram.fromValue(cpuTimeSeconds),
-                "Scheduled time distribution (s)", TDigestHistogram.fromValue(wallTimeSeconds),
-                "Blocked time distribution (s)", TDigestHistogram.fromValue(blockedWallSeconds),
                 "CPU and scheduled time usage over time", resourceUsageTimeSeries)));
     }
 
