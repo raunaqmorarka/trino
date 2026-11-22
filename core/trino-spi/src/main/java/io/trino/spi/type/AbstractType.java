@@ -13,6 +13,7 @@
  */
 package io.trino.spi.type;
 
+import com.fasterxml.jackson.annotation.JsonValue;
 import io.airlift.slice.Slice;
 import io.trino.spi.block.Block;
 import io.trino.spi.block.BlockBuilder;
@@ -24,12 +25,14 @@ public abstract class AbstractType
         implements Type
 {
     private final TypeDescriptor descriptor;
+    private final TypeId typeId;
     private final Class<?> javaType;
     private final Class<? extends ValueBlock> valueBlockType;
 
     protected AbstractType(TypeDescriptor descriptor, Class<?> javaType, Class<? extends ValueBlock> valueBlockType)
     {
         this.descriptor = descriptor;
+        this.typeId = TypeId.of(TypeSyntax.toSql(descriptor));
         this.javaType = javaType;
         this.valueBlockType = valueBlockType;
     }
@@ -38,6 +41,13 @@ public abstract class AbstractType
     public final TypeDescriptor getTypeDescriptor()
     {
         return descriptor;
+    }
+
+    @JsonValue
+    @Override
+    public TypeId getTypeId()
+    {
+        return typeId;
     }
 
     @Override
