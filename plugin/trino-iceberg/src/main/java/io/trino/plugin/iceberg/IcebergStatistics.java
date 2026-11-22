@@ -289,7 +289,7 @@ public record IcebergStatistics(
         private long compareTrinoValue(Object value, Object otherValue)
         {
             try {
-                return (Long) comparisonHandle.invoke(value, otherValue);
+                return (long) comparisonHandle.invoke(value, otherValue);
             }
             catch (Throwable throwable) {
                 throw new TrinoException(GENERIC_INTERNAL_ERROR, "Unable to compare Iceberg min/max values", throwable);
