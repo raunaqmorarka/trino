@@ -19,7 +19,10 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import io.airlift.json.JsonMapperProvider;
 import io.airlift.slice.DynamicSliceOutput;
+import io.airlift.slice.SliceInput;
+import io.airlift.slice.SliceOutput;
 import io.trino.spi.block.Block;
+import io.trino.spi.block.BlockEncodingSerde;
 import io.trino.spi.type.Type;
 import org.junit.jupiter.api.Test;
 import tools.jackson.core.Base64Variants;
@@ -96,6 +99,31 @@ public class TestBlockJsonSerde
     }
 
     @Test
+    public void testSmallBlocks()
+            throws Exception
+    {
+        for (int length = 0; length < 100; length++) {
+            Block block = createStringsBlock("x".repeat(length));
+            assertJsonIsPaddedBase64(block);
+            assertRoundTrip(VARCHAR, block);
+        }
+    }
+
+    @Test
+    public void testSizeEstimateBelowWrittenSize()
+            throws Exception
+    {
+        JsonMapper mapper = new JsonMapperProvider()
+                .withJsonSerializers(ImmutableMap.of(Block.class, new BlockJsonSerde.Serializer(new UnderestimatingBlockEncodingSerde())))
+                .get();
+        for (int length = 0; length < 100; length++) {
+            Block block = createStringsBlock("x".repeat(length));
+            String expected = "\"" + Base64Variants.MIME_NO_LINEFEEDS.encode(blockEncoding(block)) + "\"";
+            assertThat(new String(mapper.writeValueAsBytes(block), UTF_8)).isEqualTo(expected);
+        }
+    }
+
+    @Test
     public void testRejectNonAsciiCharacter()
             throws Exception
     {
@@ -137,6 +165,40 @@ public class TestBlockJsonSerde
         assertBlockEquals(type, MAPPER.readValue(json, Block.class), block);
         assertBlockEquals(type, MAPPER.readValue(new String(json, UTF_8), Block.class), block);
         assertBlockEquals(type, MAPPER.readValue(MAPPER.writeValueAsString(block), Block.class), block);
+    }
+
+    private static final class UnderestimatingBlockEncodingSerde
+            implements BlockEncodingSerde
+    {
+        @Override
+        public Block readBlock(SliceInput input)
+        {
+            return TESTING_BLOCK_ENCODING_SERDE.readBlock(input);
+        }
+
+        @Override
+        public void writeBlock(SliceOutput output, Block block)
+        {
+            TESTING_BLOCK_ENCODING_SERDE.writeBlock(output, block);
+        }
+
+        @Override
+        public long estimatedWriteSize(Block block)
+        {
+            return 1;
+        }
+
+        @Override
+        public Type readType(SliceInput sliceInput)
+        {
+            return TESTING_BLOCK_ENCODING_SERDE.readType(sliceInput);
+        }
+
+        @Override
+        public void writeType(SliceOutput sliceOutput, Type type)
+        {
+            TESTING_BLOCK_ENCODING_SERDE.writeType(sliceOutput, type);
+        }
     }
 
     public record Holder(String name, Block block, int count)
