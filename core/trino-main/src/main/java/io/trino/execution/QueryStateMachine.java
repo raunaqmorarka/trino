@@ -1500,7 +1500,7 @@ public class QueryStateMachine
     public void updateFinalQueryInfo(Supplier<Optional<StagesInfo>> stagesInfoProvider)
     {
         // query info is final only once the query is done
-        if (isDone()) {
+        if (isDone() && finalQueryInfo.get().isEmpty()) {
             updateQueryInfo(stagesInfoProvider.get());
         }
     }

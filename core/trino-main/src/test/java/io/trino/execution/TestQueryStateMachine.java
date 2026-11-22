@@ -600,6 +600,9 @@ public class TestQueryStateMachine
         stateMachine.updateFinalQueryInfo(stagesInfoProvider);
         assertThat(stagesInfoBuilds.get()).isEqualTo(1);
         assertThat(stateMachine.getFinalQueryInfo()).isPresent();
+
+        stateMachine.updateFinalQueryInfo(stagesInfoProvider);
+        assertThat(stagesInfoBuilds.get()).isEqualTo(1);
     }
 
     private void assertStats(BasicQueryStats stats, int expectedStatsValue)
