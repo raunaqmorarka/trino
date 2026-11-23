@@ -285,7 +285,8 @@ public final class FairScheduler
     /// Hand free slots to runnable tasks in fair order, on the calling thread.
     private void dispatch()
     {
-        while (!paused) {
+        // every slot release is followed by a dispatch, so no free slot means no work to hand out
+        while (!paused && concurrencyControl.availableSlots() > 0) {
             TaskControl task = queue.dequeue(QUANTUM_NANOS, concurrencyControl::tryReserve);
             if (task == null) {
                 return;
