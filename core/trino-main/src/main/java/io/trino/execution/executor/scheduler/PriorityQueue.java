@@ -22,50 +22,35 @@ import java.util.TreeSet;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 
 @NotThreadSafe
 final class PriorityQueue<T>
 {
-    // The tree is ordered by priorities in this map, so any operations on the data
-    // structures needs to consider the importance of the relative order of the operations.
-    // For instance, removing an entry from the tree before the corresponding entry in the
-    // queue is removed will lead to NPEs.
-    private final Map<T, Priority> priorities = new HashMap<>();
-    private final TreeSet<T> queue;
+    private final Map<T, Entry<T>> entries = new HashMap<>();
+    private final TreeSet<Entry<T>> queue = new TreeSet<>((first, second) -> {
+        int result = Long.compare(first.priority(), second.priority());
+        if (result == 0) {
+            result = Long.compare(first.sequence(), second.sequence());
+        }
+        return result;
+    });
 
     private long sequence;
 
-    public PriorityQueue()
-    {
-        queue = new TreeSet<>((a, b) -> {
-            Priority first = priorities.get(a);
-            Priority second = priorities.get(b);
-
-            int result = Long.compare(first.priority(), second.priority());
-            if (result == 0) {
-                result = Long.compare(first.sequence(), second.sequence());
-            }
-            return result;
-        });
-    }
-
     public void add(T value, long priority)
     {
-        checkArgument(!priorities.containsKey(value), "Value already in queue: %s", value);
-        priorities.put(value, new Priority(priority, nextSequence()));
-        queue.add(value);
+        checkArgument(!entries.containsKey(value), "Value already in queue: %s", value);
+        insert(value, priority);
     }
 
     public void addOrReplace(T value, long priority)
     {
-        if (priorities.containsKey(value)) {
-            queue.remove(value);
-            priorities.put(value, new Priority(priority, nextSequence()));
-            queue.add(value);
+        Entry<T> previous = entries.get(value);
+        if (previous != null) {
+            queue.remove(previous);
         }
-        else {
-            add(value, priority);
-        }
+        insert(value, priority);
     }
 
     public T takeOrThrow()
@@ -77,48 +62,48 @@ final class PriorityQueue<T>
 
     public T poll()
     {
-        T result = queue.pollFirst();
-        if (result != null) {
-            priorities.remove(result);
+        Entry<T> first = queue.pollFirst();
+        if (first == null) {
+            return null;
         }
-
-        return result;
+        entries.remove(first.value());
+        return first.value();
     }
 
     public void remove(T value)
     {
-        checkArgument(priorities.containsKey(value), "Value not in queue: %s", value);
-        queue.remove(value);
-        priorities.remove(value);
+        Entry<T> entry = entries.remove(value);
+        checkArgument(entry != null, "Value not in queue: %s", value);
+        queue.remove(entry);
     }
 
     public void removeIfPresent(T value)
     {
-        if (priorities.containsKey(value)) {
-            queue.remove(value);
-            priorities.remove(value);
+        Entry<T> entry = entries.remove(value);
+        if (entry != null) {
+            queue.remove(entry);
         }
     }
 
     public boolean contains(T value)
     {
-        return priorities.containsKey(value);
+        return entries.containsKey(value);
     }
 
     public boolean isEmpty()
     {
-        return priorities.isEmpty();
+        return entries.isEmpty();
     }
 
     public Set<T> values()
     {
-        return priorities.keySet();
+        return entries.keySet();
     }
 
     public long nextPriority()
     {
         checkState(!queue.isEmpty(), "Queue is empty");
-        return priorities.get(queue.first()).priority();
+        return queue.first().priority();
     }
 
     public T peek()
@@ -126,7 +111,7 @@ final class PriorityQueue<T>
         if (queue.isEmpty()) {
             return null;
         }
-        return queue.first();
+        return queue.first().value();
     }
 
     public int size()
@@ -137,13 +122,18 @@ final class PriorityQueue<T>
     @Override
     public String toString()
     {
-        return queue.toString();
+        return queue.stream()
+                .map(Entry::value)
+                .collect(toImmutableList())
+                .toString();
     }
 
-    private long nextSequence()
+    private void insert(T value, long priority)
     {
-        return sequence++;
+        Entry<T> entry = new Entry<>(value, priority, sequence++);
+        entries.put(value, entry);
+        queue.add(entry);
     }
 
-    private record Priority(long priority, long sequence) {}
+    private record Entry<T>(T value, long priority, long sequence) {}
 }
