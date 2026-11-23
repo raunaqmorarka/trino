@@ -39,6 +39,7 @@ import io.trino.node.InternalNode;
 import io.trino.operator.ForScheduler;
 import io.trino.server.remotetask.HttpRemoteTask;
 import io.trino.server.remotetask.RemoteTaskStats;
+import io.trino.server.remotetask.WorkerTaskStatusRefresher;
 import io.trino.spi.connector.ConnectorTableCredentials;
 import io.trino.sql.planner.PlanFragment;
 import io.trino.sql.planner.plan.DynamicFilterId;
@@ -47,6 +48,7 @@ import jakarta.annotation.PreDestroy;
 import org.weakref.jmx.Managed;
 import org.weakref.jmx.Nested;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -56,13 +58,18 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
 
 import static io.airlift.concurrent.Threads.daemonThreadsNamed;
+import static io.airlift.json.JsonCodec.listJsonCodec;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.Executors.newCachedThreadPool;
 import static java.util.concurrent.Executors.newSingleThreadScheduledExecutor;
+import static java.util.concurrent.TimeUnit.SECONDS;
 
 public class HttpRemoteTaskFactory
         implements RemoteTaskFactory
 {
+    // the worker answers within this wait plus 5 seconds, which stays below the scheduler client request timeout
+    private static final Duration TASK_STATUS_LONG_POLL_MAX_WAIT = new Duration(10, SECONDS);
+
     private final HttpClient httpClient;
     private final LocationFactory locationFactory;
     private final JsonCodec<TaskStatus> taskStatusCodec;
@@ -82,6 +89,7 @@ public class HttpRemoteTaskFactory
     private final Tracer tracer;
     private final RemoteTaskStats stats;
     private final DynamicFilterService dynamicFilterService;
+    private final WorkerTaskStatusRefresher workerTaskStatusRefresher;
 
     @Inject
     public HttpRemoteTaskFactory(
@@ -118,6 +126,13 @@ public class HttpRemoteTaskFactory
 
         this.updateScheduledExecutor = newSingleThreadScheduledExecutor(daemonThreadsNamed("task-info-update-scheduler-%s"));
         this.errorScheduledExecutor = newSingleThreadScheduledExecutor(daemonThreadsNamed("remote-task-error-delay-%s"));
+        this.workerTaskStatusRefresher = new WorkerTaskStatusRefresher(
+                httpClient,
+                listJsonCodec(taskStatusCodec),
+                executor,
+                updateScheduledExecutor,
+                taskStatusRefreshMaxWait);
+        workerTaskStatusRefresher.start();
     }
 
     @Managed
@@ -168,6 +183,8 @@ public class HttpRemoteTaskFactory
                 errorScheduledExecutor,
                 maxErrorDuration,
                 taskStatusRefreshMaxWait,
+                TASK_STATUS_LONG_POLL_MAX_WAIT,
+                workerTaskStatusRefresher,
                 taskInfoUpdateInterval,
                 taskTerminationTimeout,
                 summarizeTaskInfo,

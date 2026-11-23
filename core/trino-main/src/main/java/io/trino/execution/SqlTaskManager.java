@@ -403,6 +403,17 @@ public class SqlTaskManager
     }
 
     /**
+     * Gets the status of the tracked tasks that are not done, without recording a heartbeat.
+     */
+    public List<TaskStatus> getUnfinishedTaskStatuses()
+    {
+        return tasks.asMap().values().stream()
+                .filter(task -> !task.getTaskState().isDone())
+                .map(SqlTask::getTaskStatus)
+                .collect(toImmutableList());
+    }
+
+    /**
      * Gets the info for the specified task.  If the task has not been created
      * yet, an uninitialized task is created and the info is returned.
      * <p>

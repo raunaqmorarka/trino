@@ -145,6 +145,20 @@ public class TaskResource
         return allTaskInfo;
     }
 
+    @GET
+    @Path("status")
+    @Produces(MediaType.APPLICATION_JSON)
+    public void getUnfinishedTaskStatuses(
+            @HeaderParam(TRINO_NODE_INSTANCE_ID) String expectedNodeInstanceId,
+            @Suspended AsyncResponse asyncResponse)
+    {
+        failRequestIfNodeInstanceMismatch(expectedNodeInstanceId);
+        if (failRequestIfInvalid(asyncResponse)) {
+            return;
+        }
+        asyncResponse.resume(Response.ok(taskManager.getUnfinishedTaskStatuses()).build());
+    }
+
     @POST
     @Path("{taskId}")
     @Consumes(MediaType.APPLICATION_JSON)

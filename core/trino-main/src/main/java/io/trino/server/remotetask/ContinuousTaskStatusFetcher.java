@@ -30,6 +30,7 @@ import io.trino.execution.TaskStatus;
 import io.trino.spi.HostAddress;
 import io.trino.spi.TrinoException;
 
+import java.net.URI;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.atomic.AtomicLong;
@@ -55,6 +56,7 @@ class ContinuousTaskStatusFetcher
     private static final Logger log = Logger.get(ContinuousTaskStatusFetcher.class);
 
     private final TaskId taskId;
+    private final URI workerUri;
     private final String nodeInstanceId;
     private final Consumer<Throwable> onFail;
     private final StateMachine<TaskStatus> taskStatus;
@@ -63,6 +65,7 @@ class ContinuousTaskStatusFetcher
     private final DynamicFiltersFetcher dynamicFiltersFetcher;
 
     private final Duration refreshMaxWait;
+    private final WorkerTaskStatusRefresher workerTaskStatusRefresher;
     private final Executor executor;
     private final HttpClient httpClient;
     private final Supplier<SpanBuilder> spanBuilderFactory;
@@ -78,8 +81,10 @@ class ContinuousTaskStatusFetcher
     public ContinuousTaskStatusFetcher(
             Consumer<Throwable> onFail,
             TaskStatus initialTaskStatus,
+            URI workerUri,
             String nodeInstanceId,
             Duration refreshMaxWait,
+            WorkerTaskStatusRefresher workerTaskStatusRefresher,
             JsonCodec<TaskStatus> taskStatusCodec,
             DynamicFiltersFetcher dynamicFiltersFetcher,
             Executor executor,
@@ -92,12 +97,14 @@ class ContinuousTaskStatusFetcher
         requireNonNull(initialTaskStatus, "initialTaskStatus is null");
 
         this.taskId = initialTaskStatus.taskId();
+        this.workerUri = requireNonNull(workerUri, "workerUri is null");
         this.nodeInstanceId = requireNonNull(nodeInstanceId, "nodeInstanceId is null");
         this.onFail = requireNonNull(onFail, "onFail is null");
         this.taskStatus = new StateMachine<>("task-" + taskId, executor, initialTaskStatus);
         this.expectedTaskInstanceId.set(initialTaskStatus.taskInstanceId());
 
         this.refreshMaxWait = requireNonNull(refreshMaxWait, "refreshMaxWait is null");
+        this.workerTaskStatusRefresher = requireNonNull(workerTaskStatusRefresher, "workerTaskStatusRefresher is null");
         this.taskStatusCodec = requireNonNull(taskStatusCodec, "taskStatusCodec is null");
         this.dynamicFiltersFetcher = requireNonNull(dynamicFiltersFetcher, "dynamicFiltersFetcher is null");
 
@@ -116,12 +123,14 @@ class ContinuousTaskStatusFetcher
             return;
         }
         running = true;
+        workerTaskStatusRefresher.register(workerUri, nodeInstanceId, taskId, this);
         scheduleNextRequest();
     }
 
     public synchronized void stop()
     {
         running = false;
+        workerTaskStatusRefresher.unregister(workerUri, nodeInstanceId, taskId);
         if (future != null) {
             future.cancel(true);
             future = null;

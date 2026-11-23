@@ -271,8 +271,15 @@ public class TestTaskInfoFetcherInstanceMismatch
         return new ContinuousTaskStatusFetcher(
                 onFail,
                 initialStatus,
+                TASK_URI,
                 "node-instance",
                 new Duration(10, SECONDS),
+                new WorkerTaskStatusRefresher(
+                        new TestingHttpClient(_ -> { throw new UnsupportedOperationException(); }),
+                        JsonCodec.listJsonCodec(TaskStatus.class),
+                        executor,
+                        executor,
+                        new Duration(1, SECONDS)),
                 JsonCodec.jsonCodec(TaskStatus.class),
                 dynamicFiltersFetcher,
                 executor,
