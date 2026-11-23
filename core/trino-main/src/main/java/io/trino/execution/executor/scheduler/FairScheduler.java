@@ -57,6 +57,20 @@ public final class FairScheduler
     private final BlockingSchedulingQueue<Group, TaskControl> queue = new BlockingSchedulingQueue<>();
     private final Reservation<TaskControl> concurrencyControl;
     private final Ticker ticker;
+    private final BlockingSchedulingQueue.Dispatcher<TaskControl> dispatcher = new BlockingSchedulingQueue.Dispatcher<>()
+    {
+        @Override
+        public boolean tryReserve()
+        {
+            return !paused && concurrencyControl.tryReserve();
+        }
+
+        @Override
+        public void start(TaskControl task)
+        {
+            startTask(task);
+        }
+    };
 
     private volatile boolean paused;
 
@@ -198,7 +212,7 @@ public final class FairScheduler
                 delta = task.elapsed();
                 concurrencyControl.release(task);
             }
-            queue.finish(task.group(), task, delta);
+            queue.finish(task.group(), task, delta, QUANTUM_NANOS, dispatcher);
             task.transitionToFinished();
             dispatch();
         }
@@ -206,7 +220,7 @@ public final class FairScheduler
 
     private boolean makeRunnableAndAwait(TaskControl task, long deltaWeight)
     {
-        boolean enqueued = task.transitionToWaiting() && queue.enqueue(task.group(), task, deltaWeight);
+        boolean enqueued = task.transitionToWaiting() && queue.enqueue(task.group(), task, deltaWeight, QUANTUM_NANOS, dispatcher);
         // Dispatch even if the task was cancelled: a yield freed its slot without dispatching it.
         dispatch();
         if (!enqueued) {
@@ -264,7 +278,7 @@ public final class FairScheduler
         // Dispatch the freed slot only once the queue has charged the time this task actually used,
         // so the next task is chosen against up-to-date weights.
         concurrencyControl.release(task);
-        boolean blocked = task.transitionToBlocked() && queue.block(task.group(), task, delta);
+        boolean blocked = task.transitionToBlocked() && queue.block(task.group(), task, delta, QUANTUM_NANOS, dispatcher);
         dispatch();
         if (!blocked) {
             return false;
@@ -287,16 +301,20 @@ public final class FairScheduler
     {
         // every slot release is followed by a dispatch, so no free slot means no work to hand out
         while (!paused && concurrencyControl.availableSlots() > 0) {
-            TaskControl task = queue.dequeue(QUANTUM_NANOS, concurrencyControl::tryReserve);
+            TaskControl task = queue.dequeue(QUANTUM_NANOS, dispatcher);
             if (task == null) {
                 return;
             }
+            startTask(task);
+        }
+    }
 
-            concurrencyControl.register(task);
-            if (!task.markReady()) {
-                // cancelled before it could run
-                concurrencyControl.release(task);
-            }
+    private void startTask(TaskControl task)
+    {
+        concurrencyControl.register(task);
+        if (!task.markReady()) {
+            // cancelled before it could run
+            concurrencyControl.release(task);
         }
     }
 

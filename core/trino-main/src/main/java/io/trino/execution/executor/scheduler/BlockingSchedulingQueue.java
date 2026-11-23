@@ -20,7 +20,6 @@ import com.google.errorprone.annotations.concurrent.GuardedBy;
 import java.util.Set;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
-import java.util.function.BooleanSupplier;
 
 @ThreadSafe
 final class BlockingSchedulingQueue<G, T>
@@ -78,8 +77,10 @@ final class BlockingSchedulingQueue<G, T>
         }
     }
 
-    public boolean enqueue(G group, T task, long deltaWeight)
+    /// Enqueue the task, then hand a free slot to the next runnable task in the same lock hold.
+    public boolean enqueue(G group, T task, long deltaWeight, long expectedWeight, Dispatcher<T> dispatcher)
     {
+        T next;
         lock.lock();
         try {
             if (!queue.containsGroup(group)) {
@@ -87,15 +88,21 @@ final class BlockingSchedulingQueue<G, T>
             }
 
             queue.enqueue(group, task, deltaWeight);
-            return true;
+            next = dequeueLocked(expectedWeight, dispatcher);
         }
         finally {
             lock.unlock();
         }
+        if (next != null) {
+            dispatcher.start(next);
+        }
+        return true;
     }
 
-    public boolean block(G group, T task, long deltaWeight)
+    /// Block the task, then hand a free slot to the next runnable task in the same lock hold.
+    public boolean block(G group, T task, long deltaWeight, long expectedWeight, Dispatcher<T> dispatcher)
     {
+        T next;
         lock.lock();
         try {
             if (!queue.containsGroup(group)) {
@@ -103,32 +110,34 @@ final class BlockingSchedulingQueue<G, T>
             }
 
             queue.block(group, task, deltaWeight);
-            return true;
+            next = dequeueLocked(expectedWeight, dispatcher);
         }
         finally {
             lock.unlock();
         }
+        if (next != null) {
+            dispatcher.start(next);
+        }
+        return true;
     }
 
-    /// Dequeue the next runnable task if `reserve` grants it a slot, or return `null` if no task is
-    /// runnable or no slot is free. `reserve` runs under the queue lock and only when a task is
-    /// runnable, so a slot is never claimed without a task to place on it.
-    public T dequeue(long expectedWeight, BooleanSupplier reserve)
+    /// Dequeue the next runnable task if `dispatcher` grants it a slot, or return `null` if no task is
+    /// runnable or no slot is free.
+    public T dequeue(long expectedWeight, Dispatcher<T> dispatcher)
     {
         lock.lock();
         try {
-            if (queue.peek() == null || !reserve.getAsBoolean()) {
-                return null;
-            }
-            return queue.dequeue(expectedWeight);
+            return dequeueLocked(expectedWeight, dispatcher);
         }
         finally {
             lock.unlock();
         }
     }
 
-    public boolean finish(G group, T task, long deltaWeight)
+    /// Finish the task, then hand a free slot to the next runnable task in the same lock hold.
+    public boolean finish(G group, T task, long deltaWeight, long expectedWeight, Dispatcher<T> dispatcher)
     {
+        T next;
         lock.lock();
         try {
             if (!queue.containsGroup(group)) {
@@ -136,11 +145,25 @@ final class BlockingSchedulingQueue<G, T>
             }
 
             queue.finish(group, task, deltaWeight);
-            return true;
+            next = dequeueLocked(expectedWeight, dispatcher);
         }
         finally {
             lock.unlock();
         }
+        if (next != null) {
+            dispatcher.start(next);
+        }
+        return true;
+    }
+
+    /// The slot is claimed only when a task is runnable, so it is never held without a task.
+    @GuardedBy("lock")
+    private T dequeueLocked(long expectedWeight, Dispatcher<T> dispatcher)
+    {
+        if (queue.peek() == null || !dispatcher.tryReserve()) {
+            return null;
+        }
+        return queue.dequeue(expectedWeight);
     }
 
     @Override
@@ -153,5 +176,15 @@ final class BlockingSchedulingQueue<G, T>
         finally {
             lock.unlock();
         }
+    }
+
+    /// Hands free slots to runnable tasks.
+    interface Dispatcher<T>
+    {
+        /// Claim a free slot. Runs under the queue lock, and only when a task is runnable.
+        boolean tryReserve();
+
+        /// Start a task that holds a claimed slot. Runs after the queue lock is released.
+        void start(T task);
     }
 }
