@@ -52,12 +52,13 @@ import org.weakref.jmx.Nested;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Iterator;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.NavigableSet;
 import java.util.OptionalInt;
 import java.util.Set;
 import java.util.SortedSet;
+import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.ExecutorService;
@@ -82,6 +83,7 @@ import static io.trino.util.EmbedVersion.testingVersionEmbedder;
 import static java.lang.Math.min;
 import static java.lang.String.format;
 import static java.lang.System.nanoTime;
+import static java.util.Comparator.comparingLong;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.Executors.newCachedThreadPool;
 import static java.util.concurrent.TimeUnit.MICROSECONDS;
@@ -111,7 +113,14 @@ public class TimeSharingTaskExecutor
     private final SortedSet<RunningSplitInfo> runningSplitInfos = new ConcurrentSkipListSet<>();
 
     @GuardedBy("this")
-    private final List<TimeSharingTaskHandle> tasks;
+    private final Set<TimeSharingTaskHandle> tasks = new HashSet<>();
+
+    // Tasks with queued leaf splits, in round-robin order. A task moves to the end when it starts a queued leaf split.
+    @GuardedBy("this")
+    private final NavigableSet<TimeSharingTaskHandle> tasksWithQueuedLeafSplits = new TreeSet<>(comparingLong(TimeSharingTaskHandle::getRoundRobinPosition));
+
+    @GuardedBy("this")
+    private long nextRoundRobinPosition;
 
     /**
      * All splits registered with the task executor.
@@ -240,7 +249,6 @@ public class TimeSharingTaskExecutor
         this.maximumNumberOfDriversPerTask = maximumNumberOfDriversPerTask;
         this.idleLeafSplitAdmissionEnabled = idleLeafSplitAdmissionEnabled;
         this.waitingSplits = requireNonNull(splitQueue, "splitQueue is null");
-        this.tasks = new LinkedList<>();
         this.lastLeafSplitsSizeRecordTime = ticker.read();
     }
 
@@ -302,6 +310,7 @@ public class TimeSharingTaskExecutor
 
         TimeSharingTaskHandle taskHandle = new TimeSharingTaskHandle(taskId, waitingSplits, utilizationSupplier, initialSplitConcurrency, splitConcurrencyAdjustFrequency, maxDriversPerTask, taskMemory);
 
+        taskHandle.setRoundRobinPosition(nextRoundRobinPosition++);
         tasks.add(taskHandle);
         return taskHandle;
     }
@@ -342,6 +351,7 @@ public class TimeSharingTaskExecutor
         try {
             synchronized (this) {
                 tasks.remove(taskHandle);
+                tasksWithQueuedLeafSplits.remove(taskHandle);
 
                 // Task is already destroyed
                 if (taskHandle.isDestroyed()) {
@@ -423,6 +433,7 @@ public class TimeSharingTaskExecutor
                     else {
                         // add this to the work queue for the task
                         if (handle.enqueueSplit(prioritizedSplitRunner)) {
+                            tasksWithQueuedLeafSplits.add(handle);
                             // if task is under the limit for guaranteed splits, start one
                             scheduleTaskIfNecessary(handle, pendingUpdates);
                             // if globally we have more resources, start more
@@ -501,6 +512,9 @@ public class TimeSharingTaskExecutor
                 // no more splits to schedule
                 return;
             }
+            if (!taskHandle.hasQueuedLeafSplits()) {
+                tasksWithQueuedLeafSplits.remove(taskHandle);
+            }
 
             pendingUpdates.recordSplitQueuedNanos(nanoTime() - split.getCreatedNanos());
             startSplit(split, pendingUpdates);
@@ -575,12 +589,12 @@ public class TimeSharingTaskExecutor
     @GuardedBy("this")
     private PrioritizedSplitRunner pollAboveMinDrivers(LeafSplitAdmissionBudget budget)
     {
-        for (Iterator<TimeSharingTaskHandle> iterator = tasks.iterator(); iterator.hasNext(); ) {
+        for (Iterator<TimeSharingTaskHandle> iterator = tasksWithQueuedLeafSplits.iterator(); iterator.hasNext(); ) {
             TimeSharingTaskHandle task = iterator.next();
             if (task.getRunningLeafSplits() >= min(task.getTargetConcurrency(), task.getMaxDriversPerTask().orElse(maximumNumberOfDriversPerTask))) {
                 continue;
             }
-            if (task.isParked() || !task.hasQueuedLeafSplits()) {
+            if (task.isParked()) {
                 continue;
             }
             long estimate = budget.admissibleEstimate(task.getTaskId(), task.getLeafMemoryEstimate(), task.getRunningLeafSplits(), ticker.read());
@@ -590,12 +604,8 @@ public class TimeSharingTaskExecutor
             PrioritizedSplitRunner split = task.pollNextSplit();
             if (split != null) {
                 budget.reserve(task.getTaskId(), estimate);
-                // move task to end of list
                 iterator.remove();
-
-                // CAUTION: we are modifying the list in the loop which would normally
-                // cause a ConcurrentModificationException but we exit immediately
-                tasks.add(task);
+                moveToEnd(task);
                 return split;
             }
         }
@@ -633,8 +643,8 @@ public class TimeSharingTaskExecutor
     {
         // todo find a better algorithm for this
         // find the first task that produces a split, then move that task to the
-        // end of the task list, so we get round robin
-        for (Iterator<TimeSharingTaskHandle> iterator = tasks.iterator(); iterator.hasNext(); ) {
+        // end of the round-robin order
+        for (Iterator<TimeSharingTaskHandle> iterator = tasksWithQueuedLeafSplits.iterator(); iterator.hasNext(); ) {
             TimeSharingTaskHandle task = iterator.next();
             // skip tasks that are already running the configured max number of drivers
             if (task.getRunningLeafSplits() >= task.getMaxDriversPerTask().orElse(maximumNumberOfDriversPerTask)) {
@@ -642,16 +652,22 @@ public class TimeSharingTaskExecutor
             }
             PrioritizedSplitRunner split = task.pollNextSplit();
             if (split != null) {
-                // move task to end of list
                 iterator.remove();
-
-                // CAUTION: we are modifying the list in the loop which would normally
-                // cause a ConcurrentModificationException but we exit immediately
-                tasks.add(task);
+                moveToEnd(task);
                 return split;
             }
         }
         return null;
+    }
+
+    // The caller removes the task from tasksWithQueuedLeafSplits first, since its position orders that set.
+    @GuardedBy("this")
+    private void moveToEnd(TimeSharingTaskHandle task)
+    {
+        task.setRoundRobinPosition(nextRoundRobinPosition++);
+        if (task.hasQueuedLeafSplits()) {
+            tasksWithQueuedLeafSplits.add(task);
+        }
     }
 
     private synchronized void recordLeafSplitsSize(PendingUpdates pendingUpdates)
