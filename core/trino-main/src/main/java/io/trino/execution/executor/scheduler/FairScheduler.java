@@ -41,10 +41,11 @@ import static java.util.Objects.requireNonNull;
 ///     within [#runTask]). Other threads can indirectly affect what the task executor thread does by
 ///     marking the task as ready or cancelled and unblocking it, which will then act on that
 ///     information.
-///   - There is no scheduler thread. Whichever thread makes a task runnable or frees a slot calls
-///     [#dispatch()], which hands free slots to runnable tasks in fair order. A slot is reserved
-///     under the queue lock only once a runnable task is present, so it is always held by a task;
-///     every release is followed by a dispatch, so no runnable task waits while a slot is free.
+///   - There is no scheduler thread. Whichever thread makes a task runnable or frees a slot hands a
+///     free slot to the next runnable task in fair order, in the same queue lock hold as its queue
+///     update or through [#dispatch()]. A slot is reserved under the queue lock only once a runnable
+///     task is present, so it is always held by a task; every release is followed by such a hand-out,
+///     so no runnable task waits while a slot is free.
 @ThreadSafe
 public final class FairScheduler
         implements AutoCloseable
@@ -68,7 +69,9 @@ public final class FairScheduler
         @Override
         public void start(TaskControl task)
         {
-            startTask(task);
+            if (!startTask(task)) {
+                dispatch();
+            }
         }
     };
 
@@ -212,18 +215,20 @@ public final class FairScheduler
                 delta = task.elapsed();
                 concurrencyControl.release(task);
             }
-            queue.finish(task.group(), task, delta, QUANTUM_NANOS, dispatcher);
+            boolean finished = queue.finish(task.group(), task, delta, QUANTUM_NANOS, dispatcher);
             task.transitionToFinished();
-            dispatch();
+            if (!finished) {
+                dispatch();
+            }
         }
     }
 
     private boolean makeRunnableAndAwait(TaskControl task, long deltaWeight)
     {
         boolean enqueued = task.transitionToWaiting() && queue.enqueue(task.group(), task, deltaWeight, QUANTUM_NANOS, dispatcher);
-        // Dispatch even if the task was cancelled: a yield freed its slot without dispatching it.
-        dispatch();
         if (!enqueued) {
+            // a yield freed its slot without dispatching it
+            dispatch();
             return false;
         }
 
@@ -279,8 +284,8 @@ public final class FairScheduler
         // so the next task is chosen against up-to-date weights.
         concurrencyControl.release(task);
         boolean blocked = task.transitionToBlocked() && queue.block(task.group(), task, delta, QUANTUM_NANOS, dispatcher);
-        dispatch();
         if (!blocked) {
+            dispatch();
             return false;
         }
 
@@ -309,13 +314,16 @@ public final class FairScheduler
         }
     }
 
-    private void startTask(TaskControl task)
+    /// Returns false and frees the slot when the task was cancelled before it could run.
+    private boolean startTask(TaskControl task)
     {
         concurrencyControl.register(task);
         if (!task.markReady()) {
             // cancelled before it could run
             concurrencyControl.release(task);
+            return false;
         }
+        return true;
     }
 
     long getStartNanos(TaskControl task)
