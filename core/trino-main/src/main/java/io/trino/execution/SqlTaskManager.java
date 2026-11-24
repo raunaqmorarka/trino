@@ -76,6 +76,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -216,7 +217,10 @@ public class SqlTaskManager
         taskNotificationExecutorMBean = new ThreadPoolExecutorMBean((ThreadPoolExecutor) taskNotificationExecutor);
 
         this.taskManagementExecutor = taskManagementExecutor.getExecutor();
-        this.driverYieldExecutor = newScheduledThreadPool(config.getTaskYieldThreads(), threadsNamed("task-yield-%s"));
+        ScheduledThreadPoolExecutor driverYieldExecutor = new ScheduledThreadPoolExecutor(config.getTaskYieldThreads(), threadsNamed("task-yield-%s"));
+        // each driver quantum cancels its yield timer, so cancelled timers leave the queue right away
+        driverYieldExecutor.setRemoveOnCancelPolicy(true);
+        this.driverYieldExecutor = driverYieldExecutor;
         this.driverTimeoutExecutor = newScheduledThreadPool(config.getDriverTimeoutThreads(), threadsNamed("task-driver-timeout-%s"));
 
         SqlTaskExecutionFactory sqlTaskExecutionFactory = new SqlTaskExecutionFactory(taskNotificationExecutor, taskExecutor, planner, tracer, config);
