@@ -437,6 +437,62 @@ public class TestTimeSharingTaskExecutor
 
     @Test
     @Timeout(30)
+    public void testLeafSplitsAboveGuaranteedDriversStartInRoundRobinOrder()
+    {
+        TestingTicker ticker = new TestingTicker();
+        TimeSharingTaskExecutor taskExecutor = new TimeSharingTaskExecutor(4, 4, 1, 4, ticker);
+
+        taskExecutor.start();
+        try {
+            TaskHandle firstTask = taskExecutor.addTask(new TaskId(new StageId("first", 0), 0, 0), () -> 0, 10, new Duration(1, MILLISECONDS), OptionalInt.empty(), NO_TASK_MEMORY);
+            TaskHandle secondTask = taskExecutor.addTask(new TaskId(new StageId("second", 0), 0, 0), () -> 0, 10, new Duration(1, MILLISECONDS), OptionalInt.empty(), NO_TASK_MEMORY);
+            TaskHandle thirdTask = taskExecutor.addTask(new TaskId(new StageId("third", 0), 0, 0), () -> 0, 10, new Duration(1, MILLISECONDS), OptionalInt.empty(), NO_TASK_MEMORY);
+
+            Phaser guaranteedSplitsPhaser = new Phaser(1);
+            TestingJob firstGuaranteed = new TestingJob(ticker, new Phaser(), new Phaser(), guaranteedSplitsPhaser, 1, 0);
+            TestingJob secondGuaranteed = new TestingJob(ticker, new Phaser(), new Phaser(), guaranteedSplitsPhaser, 1, 0);
+            TestingJob thirdGuaranteed = new TestingJob(ticker, new Phaser(), new Phaser(), guaranteedSplitsPhaser, 1, 0);
+            taskExecutor.enqueueSplits(firstTask, false, ImmutableList.of(firstGuaranteed));
+            taskExecutor.enqueueSplits(secondTask, false, ImmutableList.of(secondGuaranteed));
+            taskExecutor.enqueueSplits(thirdTask, false, ImmutableList.of(thirdGuaranteed));
+
+            Phaser firstExtraPhaser = new Phaser(1);
+            TestingJob firstExtra = new TestingJob(ticker, new Phaser(), new Phaser(), firstExtraPhaser, 1, 0);
+            taskExecutor.enqueueSplits(firstTask, false, ImmutableList.of(firstExtra));
+            waitUntilSplitsStart(ImmutableList.of(firstGuaranteed, secondGuaranteed, thirdGuaranteed, firstExtra));
+
+            Phaser firstQueuedPhaser = new Phaser(1);
+            Phaser secondQueuedPhaser = new Phaser(1);
+            Phaser thirdQueuedPhaser = new Phaser(1);
+            TestingJob firstQueued = new TestingJob(ticker, new Phaser(), new Phaser(), firstQueuedPhaser, 1, 0);
+            TestingJob secondQueued = new TestingJob(ticker, new Phaser(), new Phaser(), secondQueuedPhaser, 1, 0);
+            TestingJob thirdQueued = new TestingJob(ticker, new Phaser(), new Phaser(), thirdQueuedPhaser, 1, 0);
+            taskExecutor.enqueueSplits(firstTask, false, ImmutableList.of(firstQueued));
+            taskExecutor.enqueueSplits(secondTask, false, ImmutableList.of(secondQueued));
+            taskExecutor.enqueueSplits(thirdTask, false, ImmutableList.of(thirdQueued));
+
+            firstExtraPhaser.arriveAndDeregister();
+            waitUntilSplitsStart(ImmutableList.of(secondQueued));
+            assertThat(firstQueued.isStarted()).isFalse();
+            assertThat(thirdQueued.isStarted()).isFalse();
+
+            secondQueuedPhaser.arriveAndDeregister();
+            waitUntilSplitsStart(ImmutableList.of(thirdQueued));
+            assertThat(firstQueued.isStarted()).isFalse();
+
+            thirdQueuedPhaser.arriveAndDeregister();
+            waitUntilSplitsStart(ImmutableList.of(firstQueued));
+
+            firstQueuedPhaser.arriveAndDeregister();
+            guaranteedSplitsPhaser.arriveAndDeregister();
+        }
+        finally {
+            taskExecutor.stop();
+        }
+    }
+
+    @Test
+    @Timeout(30)
     public void testUserSpecifiedMaxDriversPerTask()
     {
         MultilevelSplitQueue splitQueue = new MultilevelSplitQueue(2);

@@ -68,6 +68,9 @@ public class TimeSharingTaskHandle
     // Leaf splits blocked on their output or on another operator.
     private final Set<PrioritizedSplitRunner> parkedLeafSplits = ConcurrentHashMap.newKeySet();
 
+    // Position in the task executor's round-robin order, accessed only under the task executor lock.
+    private long roundRobinPosition;
+
     public TimeSharingTaskHandle(
             TaskId taskId,
             MultilevelSplitQueue splitQueue,
@@ -249,6 +252,16 @@ public class TimeSharingTaskHandle
     public int getNextSplitId()
     {
         return nextSplitId.getAndIncrement();
+    }
+
+    long getRoundRobinPosition()
+    {
+        return roundRobinPosition;
+    }
+
+    void setRoundRobinPosition(long roundRobinPosition)
+    {
+        this.roundRobinPosition = roundRobinPosition;
     }
 
     @Override
