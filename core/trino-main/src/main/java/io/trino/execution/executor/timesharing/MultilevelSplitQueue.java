@@ -15,7 +15,6 @@ package io.trino.execution.executor.timesharing;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.errorprone.annotations.ThreadSafe;
-import com.google.errorprone.annotations.concurrent.GuardedBy;
 import com.google.inject.Inject;
 import io.airlift.stats.CounterStat;
 import io.trino.execution.TaskManagerConfig;
@@ -23,16 +22,12 @@ import org.weakref.jmx.Managed;
 import org.weakref.jmx.Nested;
 
 import java.util.Collection;
-import java.util.PriorityQueue;
-import java.util.Queue;
-import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.ReentrantLock;
 
 import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.math.DoubleMath.roundToLong;
 import static java.math.RoundingMode.HALF_UP;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
@@ -44,21 +39,18 @@ public class MultilevelSplitQueue
     static final int[] LEVEL_THRESHOLD_SECONDS = {0, 1, 10, 60, 300};
     static final long LEVEL_CONTRIBUTION_CAP = SECONDS.toNanos(30);
 
-    @GuardedBy("lock")
-    private final PriorityQueue<PrioritizedSplitRunner>[] levelWaitingSplits;
+    private final ConcurrentSkipListSet<PrioritizedSplitRunner>[] levelWaitingSplits;
 
-    // offered splits wait here until a taker moves them into levelWaitingSplits
-    private final Queue<PrioritizedSplitRunner> offeredSplits = new ConcurrentLinkedQueue<>();
-    // one permit per offered split, so a taker blocks only when no split can be waiting
-    private final Semaphore offeredSplitPermits = new Semaphore(0);
+    // one permit per waiting split, so a taker blocks only when no split can be waiting
+    private final Semaphore waitingSplitPermits = new Semaphore(0);
+    // permits that takers hold for splits removed from the queue
+    private final AtomicInteger orphanedPermits = new AtomicInteger();
     private final AtomicInteger waitingSplitCount = new AtomicInteger();
 
     private final AtomicLong[] levelScheduledTime;
 
     private final AtomicLong[] levelMinPriority;
     private final CounterStat[] selectedLevelCounters;
-
-    private final ReentrantLock lock = new ReentrantLock();
 
     private final double levelTimeMultiplier;
 
@@ -72,13 +64,13 @@ public class MultilevelSplitQueue
     {
         this.levelScheduledTime = new AtomicLong[LEVEL_THRESHOLD_SECONDS.length];
         this.levelMinPriority = new AtomicLong[LEVEL_THRESHOLD_SECONDS.length];
-        this.levelWaitingSplits = new PriorityQueue[LEVEL_THRESHOLD_SECONDS.length];
+        this.levelWaitingSplits = new ConcurrentSkipListSet[LEVEL_THRESHOLD_SECONDS.length];
         this.selectedLevelCounters = new CounterStat[LEVEL_THRESHOLD_SECONDS.length];
 
         for (int level = 0; level < LEVEL_THRESHOLD_SECONDS.length; level++) {
             levelScheduledTime[level] = new AtomicLong();
             levelMinPriority[level] = new AtomicLong(-1);
-            levelWaitingSplits[level] = new PriorityQueue<>();
+            levelWaitingSplits[level] = new ConcurrentSkipListSet<>();
             selectedLevelCounters[level] = new CounterStat();
         }
 
@@ -110,68 +102,60 @@ public class MultilevelSplitQueue
             return;
         }
         waitingSplitCount.incrementAndGet();
-        offeredSplits.add(split);
-        offeredSplitPermits.release();
+        addWaitingSplit(split);
+        waitingSplitPermits.release();
     }
 
     public PrioritizedSplitRunner take()
             throws InterruptedException
     {
+        waitingSplitPermits.acquire();
         while (true) {
-            offeredSplitPermits.acquire();
-            try {
-                lock.lockInterruptibly();
-            }
-            catch (InterruptedException e) {
-                offeredSplitPermits.release();
-                throw e;
-            }
-            PrioritizedSplitRunner result;
-            try {
-                addOfferedSplits();
-                result = pollSplit();
-                // a split whose level changed goes back to its new level, and the permit stays with this taker
-                while (result != null && result.updateLevelPriority()) {
-                    result.setReady();
-                    addWaitingSplit(result);
-                    result = pollSplit();
+            PrioritizedSplitRunner result = pollSplit();
+            if (result == null) {
+                if (tryTakeOrphanedPermit()) {
+                    waitingSplitPermits.acquire();
                 }
-                if (result != null) {
-                    int selectedLevel = result.getPriority().getLevel();
-                    levelMinPriority[selectedLevel].set(result.getPriority().getLevelPriority());
+                else {
+                    // a split for this permit is waiting in a level this taker already scanned
+                    Thread.onSpinWait();
                 }
+                continue;
             }
-            finally {
-                lock.unlock();
+            // a split whose level changed goes back to its new level, and the permit stays with this taker
+            if (result.updateLevelPriority()) {
+                // a split of a destroyed task is dropped together with its permit
+                if (result.getTaskHandle().isDestroyed()) {
+                    waitingSplitCount.decrementAndGet();
+                    waitingSplitPermits.acquire();
+                    continue;
+                }
+                result.setReady();
+                addWaitingSplit(result);
+                continue;
             }
-            // no split means the permit belonged to a split that was removed or discarded
-            if (result != null) {
-                waitingSplitCount.decrementAndGet();
-                selectedLevelCounters[result.getPriority().getLevel()].update(1);
-                return result;
-            }
+            int selectedLevel = result.getPriority().getLevel();
+            levelMinPriority[selectedLevel].set(result.getPriority().getLevelPriority());
+            waitingSplitCount.decrementAndGet();
+            selectedLevelCounters[selectedLevel].update(1);
+            return result;
         }
     }
 
-    @GuardedBy("lock")
-    private void addOfferedSplits()
+    private boolean tryTakeOrphanedPermit()
     {
-        PrioritizedSplitRunner split = offeredSplits.poll();
-        while (split != null) {
-            addWaitingSplit(split);
-            split = offeredSplits.poll();
+        int orphaned = orphanedPermits.get();
+        while (orphaned > 0) {
+            if (orphanedPermits.compareAndSet(orphaned, orphaned - 1)) {
+                return true;
+            }
+            orphaned = orphanedPermits.get();
         }
+        return false;
     }
 
-    @GuardedBy("lock")
     private void addWaitingSplit(PrioritizedSplitRunner split)
     {
-        // the task can be destroyed after the split was offered
-        if (split.getTaskHandle().isDestroyed()) {
-            waitingSplitCount.decrementAndGet();
-            return;
-        }
-
         int level = split.getPriority().getLevel();
         if (levelWaitingSplits[level].isEmpty()) {
             // Accesses to levelScheduledTime are not synchronized, so we have a data race
@@ -180,11 +164,11 @@ public class MultilevelSplitQueue
             // can update the level time. Therefore, this is benign.
             long level0Time = getLevel0TargetTime();
             long levelExpectedTime = (long) (level0Time / Math.pow(levelTimeMultiplier, level));
-            long delta = levelExpectedTime - levelScheduledTime[level].get();
-            levelScheduledTime[level].addAndGet(delta);
+            // concurrent offers to an empty level all set the same expected time
+            levelScheduledTime[level].set(levelExpectedTime);
         }
 
-        levelWaitingSplits[level].offer(split);
+        levelWaitingSplits[level].add(split);
     }
 
     /**
@@ -195,36 +179,37 @@ public class MultilevelSplitQueue
      * with the objective of minimizing deviation from the target scheduled time. From this level,
      * we pick the split with the lowest priority.
      */
-    @GuardedBy("lock")
     private PrioritizedSplitRunner pollSplit()
     {
-        long targetScheduledTime = getLevel0TargetTime();
-        double worstRatio = 1;
-        int selectedLevel = -1;
-        for (int level = 0; level < LEVEL_THRESHOLD_SECONDS.length; level++) {
-            if (!levelWaitingSplits[level].isEmpty()) {
-                long levelTime = levelScheduledTime[level].get();
-                double ratio = levelTime == 0 ? 0 : targetScheduledTime / (1.0 * levelTime);
-                if (selectedLevel == -1 || ratio > worstRatio) {
-                    worstRatio = ratio;
-                    selectedLevel = level;
+        while (true) {
+            long targetScheduledTime = getLevel0TargetTime();
+            double worstRatio = 1;
+            int selectedLevel = -1;
+            for (int level = 0; level < LEVEL_THRESHOLD_SECONDS.length; level++) {
+                if (!levelWaitingSplits[level].isEmpty()) {
+                    long levelTime = levelScheduledTime[level].get();
+                    double ratio = levelTime == 0 ? 0 : targetScheduledTime / (1.0 * levelTime);
+                    if (selectedLevel == -1 || ratio > worstRatio) {
+                        worstRatio = ratio;
+                        selectedLevel = level;
+                    }
                 }
+
+                targetScheduledTime = roundToLong(targetScheduledTime / levelTimeMultiplier, HALF_UP);
             }
 
-            targetScheduledTime = roundToLong(targetScheduledTime / levelTimeMultiplier, HALF_UP);
+            if (selectedLevel == -1) {
+                return null;
+            }
+
+            PrioritizedSplitRunner result = levelWaitingSplits[selectedLevel].pollFirst();
+            // another taker can empty the selected level after the scan
+            if (result != null) {
+                return result;
+            }
         }
-
-        if (selectedLevel == -1) {
-            return null;
-        }
-
-        PrioritizedSplitRunner result = levelWaitingSplits[selectedLevel].poll();
-        checkState(result != null, "pollSplit cannot return null");
-
-        return result;
     }
 
-    @GuardedBy("lock")
     private long getLevel0TargetTime()
     {
         long level0TargetTime = levelScheduledTime[0].get();
@@ -284,33 +269,21 @@ public class MultilevelSplitQueue
     public void remove(PrioritizedSplitRunner split)
     {
         checkArgument(split != null, "split is null");
-        lock.lock();
-        try {
-            addOfferedSplits();
-            for (PriorityQueue<PrioritizedSplitRunner> level : levelWaitingSplits) {
-                if (level.remove(split)) {
-                    waitingSplitCount.decrementAndGet();
+        for (ConcurrentSkipListSet<PrioritizedSplitRunner> level : levelWaitingSplits) {
+            if (level.remove(split)) {
+                waitingSplitCount.decrementAndGet();
+                // a taker can hold the permit of the removed split
+                if (!waitingSplitPermits.tryAcquire()) {
+                    orphanedPermits.incrementAndGet();
                 }
             }
-        }
-        finally {
-            lock.unlock();
         }
     }
 
     public void removeAll(Collection<PrioritizedSplitRunner> splits)
     {
-        lock.lock();
-        try {
-            addOfferedSplits();
-            for (PriorityQueue<PrioritizedSplitRunner> level : levelWaitingSplits) {
-                int sizeBefore = level.size();
-                level.removeAll(splits);
-                waitingSplitCount.addAndGet(level.size() - sizeBefore);
-            }
-        }
-        finally {
-            lock.unlock();
+        for (PrioritizedSplitRunner split : splits) {
+            remove(split);
         }
     }
 
