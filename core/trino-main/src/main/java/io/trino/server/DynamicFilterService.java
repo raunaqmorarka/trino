@@ -273,7 +273,9 @@ public class DynamicFilterService
             return EMPTY;
         }
 
+        // Split generation waits only for filters from replicated joins, whose build side is small.
         List<ListenableFuture<Void>> lazyDynamicFilterFutures = dynamicFilters.stream()
+                .filter(context.getReplicatedDynamicFilters()::contains)
                 .map(context.getLazyDynamicFilters()::get)
                 .filter(Objects::nonNull)
                 .collect(toImmutableList());
