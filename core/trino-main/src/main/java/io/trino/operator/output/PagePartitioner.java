@@ -118,10 +118,7 @@ public class PagePartitioner
         int pageSize = toIntExact(min(DEFAULT_MAX_PAGE_SIZE_IN_BYTES, maxMemory.toBytes() / partitionCount));
         pageSize = max(1, pageSize);
 
-        this.positionsAppenders = new PositionsAppenderPageBuilder[partitionCount];
-        for (int i = 0; i < partitionCount; i++) {
-            positionsAppenders[i] = PositionsAppenderPageBuilder.withMaxPageSize(pageSize, requireNonNull(sourceTypes, "sourceTypes is null"), positionsAppenderFactory);
-        }
+        this.positionsAppenders = PositionsAppenderPageBuilder.createPageBuilders(partitionCount, pageSize, requireNonNull(sourceTypes, "sourceTypes is null"), positionsAppenderFactory);
         this.memoryContext = aggregatedMemoryContext.newLocalMemoryContext(PagePartitioner.class.getSimpleName());
         updateMemoryUsage();
     }
