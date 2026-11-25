@@ -945,6 +945,166 @@ public class TimeSharingTaskExecutor
     }
 
     @Managed
+    public int getIdleRunners()
+    {
+        return waitingSplits.getIdleTakers();
+    }
+
+    @Managed
+    public int getRunningLeafSplits()
+    {
+        int count = 0;
+        for (PrioritizedSplitRunner split : runningSplits) {
+            if (split.isLeaf()) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    @Managed
+    public synchronized int getQueuedLeafTasks()
+    {
+        return tasksWithQueuedLeafSplits.size();
+    }
+
+    @Managed
+    public synchronized int getQueuedLeafSplits()
+    {
+        int count = 0;
+        for (TimeSharingTaskHandle task : tasksWithQueuedLeafSplits) {
+            count += task.getQueuedLeafSplitCount();
+        }
+        return count;
+    }
+
+    @Managed
+    public synchronized int getQueuedLeafTasksRunningLeaf()
+    {
+        int count = 0;
+        for (TimeSharingTaskHandle task : tasksWithQueuedLeafSplits) {
+            count += task.getRunningLeafSplits();
+        }
+        return count;
+    }
+
+    @Managed
+    public synchronized int getQueuedLeafTasksAtLimit()
+    {
+        return countQueuedLeafTasks(QueuedLeafTaskState.AT_LIMIT);
+    }
+
+    @Managed
+    public synchronized int getQueuedLeafTasksParked()
+    {
+        return countQueuedLeafTasks(QueuedLeafTaskState.PARKED);
+    }
+
+    @Managed
+    public synchronized int getQueuedLeafTasksNoEstimate()
+    {
+        return countQueuedLeafTasks(QueuedLeafTaskState.NO_ESTIMATE);
+    }
+
+    @Managed
+    public synchronized int getQueuedLeafTasksOpen()
+    {
+        return countQueuedLeafTasks(QueuedLeafTaskState.OPEN);
+    }
+
+    private enum QueuedLeafTaskState
+    {
+        AT_LIMIT,
+        PARKED,
+        NO_ESTIMATE,
+        OPEN,
+    }
+
+    @GuardedBy("this")
+    private int countQueuedLeafTasks(QueuedLeafTaskState state)
+    {
+        int count = 0;
+        for (TimeSharingTaskHandle task : tasksWithQueuedLeafSplits) {
+            QueuedLeafTaskState taskState;
+            if (task.getRunningLeafSplits() >= min(task.getTargetConcurrency(), task.getMaxDriversPerTask().orElse(maximumNumberOfDriversPerTask))) {
+                taskState = QueuedLeafTaskState.AT_LIMIT;
+            }
+            else if (task.isParked()) {
+                taskState = QueuedLeafTaskState.PARKED;
+            }
+            else if (task.getLeafMemoryEstimate().current() == 0) {
+                taskState = QueuedLeafTaskState.NO_ESTIMATE;
+            }
+            else {
+                taskState = QueuedLeafTaskState.OPEN;
+            }
+            if (taskState == state) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    @Managed
+    public int getBlockedLeafSource()
+    {
+        return countBlocked(true, BlockedReason.SOURCE);
+    }
+
+    @Managed
+    public int getBlockedLeafOperator()
+    {
+        return countBlocked(true, BlockedReason.OPERATOR);
+    }
+
+    @Managed
+    public int getBlockedLeafOutput()
+    {
+        return countBlocked(true, BlockedReason.OUTPUT);
+    }
+
+    @Managed
+    public int getBlockedLeafMemory()
+    {
+        return countBlocked(true, BlockedReason.MEMORY);
+    }
+
+    @Managed
+    public int getBlockedIntermediateSource()
+    {
+        return countBlocked(false, BlockedReason.SOURCE);
+    }
+
+    @Managed
+    public int getBlockedIntermediateOperator()
+    {
+        return countBlocked(false, BlockedReason.OPERATOR);
+    }
+
+    @Managed
+    public int getBlockedIntermediateOutput()
+    {
+        return countBlocked(false, BlockedReason.OUTPUT);
+    }
+
+    @Managed
+    public int getBlockedIntermediateMemory()
+    {
+        return countBlocked(false, BlockedReason.MEMORY);
+    }
+
+    private int countBlocked(boolean leaf, BlockedReason reason)
+    {
+        int count = 0;
+        for (PrioritizedSplitRunner split : blockedSplits.keySet()) {
+            if (split.isLeaf() == leaf && split.getBlockedReason() == reason) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    @Managed
     public long getLeafSplitsAdmittedAboveMinDrivers()
     {
         return leafSplitsAdmittedAboveMinDrivers.get();

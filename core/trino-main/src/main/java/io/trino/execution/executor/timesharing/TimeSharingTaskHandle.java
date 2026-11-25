@@ -209,6 +209,11 @@ public class TimeSharingTaskHandle
         return true;
     }
 
+    synchronized int getQueuedLeafSplitCount()
+    {
+        return queuedLeafSplits.size();
+    }
+
     synchronized int getRunningLeafSplits()
     {
         return runningLeafSplits.size();

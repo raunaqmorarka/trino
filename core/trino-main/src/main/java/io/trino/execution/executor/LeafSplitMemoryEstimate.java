@@ -40,6 +40,11 @@ public class LeafSplitMemoryEstimate
         return taskMemory;
     }
 
+    public long current()
+    {
+        return bytesPerSplit.get();
+    }
+
     // Samples the largest leaf driver memory at most once per refresh interval and returns the highest sample, or zero before the first sample.
     public long sample(long nowNanos)
     {

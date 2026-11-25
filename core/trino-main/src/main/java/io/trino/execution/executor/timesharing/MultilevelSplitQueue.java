@@ -320,6 +320,11 @@ public class MultilevelSplitQueue
         return levelMinPriority[level].get();
     }
 
+    public int getIdleTakers()
+    {
+        return offeredSplitPermits.getQueueLength();
+    }
+
     public int size()
     {
         return waitingSplitCount.get();
