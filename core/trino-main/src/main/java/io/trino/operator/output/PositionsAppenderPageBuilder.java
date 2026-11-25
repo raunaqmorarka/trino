@@ -48,10 +48,19 @@ public final class PositionsAppenderPageBuilder
     @VisibleForTesting
     static PositionsAppenderPageBuilder withMaxPageSize(int maxPageBytes, int maxDirectSizeInBytes, List<Type> sourceTypes, PositionsAppenderFactory positionsAppenderFactory)
     {
-        return new PositionsAppenderPageBuilder(DEFAULT_INITIAL_EXPECTED_ENTRIES, maxPageBytes, maxDirectSizeInBytes, sourceTypes, positionsAppenderFactory);
+        return create(1, DEFAULT_INITIAL_EXPECTED_ENTRIES, maxPageBytes, maxDirectSizeInBytes, sourceTypes, positionsAppenderFactory)[0];
     }
 
-    private PositionsAppenderPageBuilder(
+    /**
+     * Creates {@code count} page builders that share one identical operator per channel.
+     */
+    public static PositionsAppenderPageBuilder[] createPageBuilders(int count, int maxPageBytes, List<Type> sourceTypes, PositionsAppenderFactory positionsAppenderFactory)
+    {
+        return create(count, DEFAULT_INITIAL_EXPECTED_ENTRIES, maxPageBytes, maxPageBytes * MAXIMUM_DIRECT_SIZE_MULTIPLIER, sourceTypes, positionsAppenderFactory);
+    }
+
+    private static PositionsAppenderPageBuilder[] create(
+            int count,
             int initialExpectedEntries,
             int maxPageSizeInBytes,
             int maxDirectPageSizeInBytes,
@@ -64,12 +73,26 @@ public final class PositionsAppenderPageBuilder
         checkArgument(maxDirectPageSizeInBytes > 0, "maxDirectPageSizeInBytes is negative: %s", maxDirectPageSizeInBytes);
         checkArgument(maxDirectPageSizeInBytes >= maxPageSizeInBytes, "maxDirectPageSizeInBytes (%s) must be >= maxPageSizeInBytes (%s)", maxDirectPageSizeInBytes, maxPageSizeInBytes);
 
+        UnnestingPositionsAppender[][] appendersByChannel = new UnnestingPositionsAppender[types.size()][];
+        for (int channel = 0; channel < appendersByChannel.length; channel++) {
+            appendersByChannel[channel] = positionsAppenderFactory.create(types.get(channel), count, initialExpectedEntries, maxPageSizeInBytes);
+        }
+        PositionsAppenderPageBuilder[] pageBuilders = new PositionsAppenderPageBuilder[count];
+        for (int i = 0; i < count; i++) {
+            UnnestingPositionsAppender[] channelAppenders = new UnnestingPositionsAppender[appendersByChannel.length];
+            for (int channel = 0; channel < channelAppenders.length; channel++) {
+                channelAppenders[channel] = appendersByChannel[channel][i];
+            }
+            pageBuilders[i] = new PositionsAppenderPageBuilder(maxPageSizeInBytes, maxDirectPageSizeInBytes, channelAppenders);
+        }
+        return pageBuilders;
+    }
+
+    private PositionsAppenderPageBuilder(int maxPageSizeInBytes, int maxDirectPageSizeInBytes, UnnestingPositionsAppender[] channelAppenders)
+    {
         this.maxPageSizeInBytes = maxPageSizeInBytes;
         this.maxDirectPageSizeInBytes = maxDirectPageSizeInBytes;
-        channelAppenders = new UnnestingPositionsAppender[types.size()];
-        for (int i = 0; i < channelAppenders.length; i++) {
-            channelAppenders[i] = positionsAppenderFactory.create(types.get(i), initialExpectedEntries, maxPageSizeInBytes);
-        }
+        this.channelAppenders = channelAppenders;
     }
 
     public void appendToOutputPartition(Page page)

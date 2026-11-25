@@ -39,18 +39,40 @@ public class PositionsAppenderFactory
 
     public UnnestingPositionsAppender create(Type type, int expectedPositions, long maxPageSizeInBytes)
     {
+        return create(type, 1, expectedPositions, maxPageSizeInBytes)[0];
+    }
+
+    /**
+     * Creates {@code count} appenders for {@code type} that share one identical operator.
+     */
+    public UnnestingPositionsAppender[] create(Type type, int count, int expectedPositions, long maxPageSizeInBytes)
+    {
         Optional<BlockPositionIsIdentical> distinctFromOperator = Optional.empty();
         if (type.isComparable()) {
             distinctFromOperator = Optional.of(blockTypeOperators.getIdenticalOperator(type));
         }
-        return new UnnestingPositionsAppender(createPrimitiveAppender(type, expectedPositions, maxPageSizeInBytes), distinctFromOperator);
+        PositionsAppender[] primitiveAppenders = createPrimitiveAppenders(type, count, expectedPositions, maxPageSizeInBytes);
+        UnnestingPositionsAppender[] appenders = new UnnestingPositionsAppender[count];
+        for (int i = 0; i < count; i++) {
+            appenders[i] = new UnnestingPositionsAppender(primitiveAppenders[i], distinctFromOperator);
+        }
+        return appenders;
     }
 
-    private PositionsAppender createPrimitiveAppender(Type type, int expectedPositions, long maxPageSizeInBytes)
+    private PositionsAppender[] createPrimitiveAppenders(Type type, int count, int expectedPositions, long maxPageSizeInBytes)
     {
         if (type.getValueBlockType() == RowBlock.class) {
-            return RowPositionsAppender.createRowAppender(this, (RowType) type, expectedPositions, maxPageSizeInBytes);
+            return RowPositionsAppender.createRowAppenders(this, (RowType) type, count, expectedPositions, maxPageSizeInBytes);
         }
+        PositionsAppender[] appenders = new PositionsAppender[count];
+        for (int i = 0; i < count; i++) {
+            appenders[i] = createPrimitiveAppender(type, expectedPositions, maxPageSizeInBytes);
+        }
+        return appenders;
+    }
+
+    private static PositionsAppender createPrimitiveAppender(Type type, int expectedPositions, long maxPageSizeInBytes)
+    {
         if (type.getValueBlockType() == VariableWidthBlock.class) {
             // it is guaranteed Math.min will not overflow; safe to cast
             int expectedBytes = (int) min((long) expectedPositions * EXPECTED_VARIABLE_WIDTH_BYTES_PER_ENTRY, maxPageSizeInBytes);

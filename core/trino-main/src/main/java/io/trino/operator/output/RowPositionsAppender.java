@@ -59,17 +59,26 @@ public final class RowPositionsAppender
     private long retainedSizeInBytes = -1;
     private long sizeInBytes = -1;
 
-    public static RowPositionsAppender createRowAppender(
+    public static RowPositionsAppender[] createRowAppenders(
             PositionsAppenderFactory positionsAppenderFactory,
             RowType type,
+            int count,
             int expectedPositions,
             long maxPageSizeInBytes)
     {
-        UnnestingPositionsAppender[] fields = new UnnestingPositionsAppender[type.getFields().size()];
-        for (int i = 0; i < fields.length; i++) {
-            fields[i] = positionsAppenderFactory.create(type.getFields().get(i).getType(), expectedPositions, maxPageSizeInBytes);
+        UnnestingPositionsAppender[][] appendersByField = new UnnestingPositionsAppender[type.getFields().size()][];
+        for (int field = 0; field < appendersByField.length; field++) {
+            appendersByField[field] = positionsAppenderFactory.create(type.getFields().get(field).getType(), count, expectedPositions, maxPageSizeInBytes);
         }
-        return new RowPositionsAppender(type, fields, expectedPositions);
+        RowPositionsAppender[] appenders = new RowPositionsAppender[count];
+        for (int i = 0; i < count; i++) {
+            UnnestingPositionsAppender[] fields = new UnnestingPositionsAppender[appendersByField.length];
+            for (int field = 0; field < fields.length; field++) {
+                fields[field] = appendersByField[field][i];
+            }
+            appenders[i] = new RowPositionsAppender(type, fields, expectedPositions);
+        }
+        return appenders;
     }
 
     private RowPositionsAppender(RowType type, UnnestingPositionsAppender[] fieldAppenders, int expectedPositions)
