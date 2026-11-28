@@ -48,6 +48,9 @@ public class PagePartitionerPool
     private final Queue<PagePartitioner> free = new ArrayDeque<>();
     @GuardedBy("this")
     private boolean closed;
+    // polled and not yet returned to free or closed
+    @GuardedBy("this")
+    private int outstanding;
 
     public PagePartitionerPool(int maxFree, Supplier<PagePartitioner> pagePartitionerSupplier)
     {
@@ -58,11 +61,18 @@ public class PagePartitionerPool
     public synchronized PagePartitioner poll()
     {
         checkArgument(!closed, "The pool is already closed");
-        return free.isEmpty() ? pagePartitionerSupplier.get() : free.poll();
+        PagePartitioner pagePartitioner = free.poll();
+        if (pagePartitioner == null) {
+            pagePartitioner = pagePartitionerSupplier.get();
+        }
+        outstanding++;
+        return pagePartitioner;
     }
 
     /**
-     * Returns the {@link PagePartitioner} to the pool or closes it. It is closed if preparing it for release fails.
+     * Returns the {@link PagePartitioner} to the pool. When the pool keeps no more free partitioners, or is closed while
+     * other partitioners are outstanding, its buffered rows move into a free partitioner. The last partitioner returned
+     * after {@link #close()} flushes all free partitioners. It is closed if preparing it for release fails.
      */
     public Metrics release(PagePartitioner pagePartitioner, OperatorContext operatorContext)
     {
@@ -72,21 +82,64 @@ public class PagePartitionerPool
         }
         catch (Throwable e) {
             closeAllSuppress(e, pagePartitioner);
+            closeAllSuppress(e, takeFreeAfterFailedRelease());
             throw e;
         }
 
-        // pagePartitioner.close can take a long time (flush->serialization), we want to keep it out of the synchronized block
-        boolean shouldRetain;
+        PagePartitioner target;
         synchronized (this) {
-            shouldRetain = !closed && free.size() < maxFree;
-            if (shouldRetain) {
+            if (!closed && free.size() < maxFree) {
                 free.add(pagePartitioner);
+                outstanding--;
+                return metrics;
+            }
+            target = free.poll();
+            if (target == null) {
+                if (closed && outstanding > 1) {
+                    free.add(pagePartitioner);
+                    outstanding--;
+                    return metrics;
+                }
+                outstanding--;
             }
         }
-        if (!shouldRetain) {
+        if (target == null) {
+            // pagePartitioner.close can take a long time (flush->serialization), we want to keep it out of the synchronized block
             pagePartitioner.close();
+            return metrics;
         }
+
+        try {
+            target.mergeFrom(pagePartitioner);
+        }
+        catch (Throwable e) {
+            closeAllSuppress(e, target, pagePartitioner);
+            closeAllSuppress(e, takeFreeAfterFailedRelease());
+            throw e;
+        }
+        pagePartitioner.close();
+        boolean retainTarget;
+        Collection<PagePartitioner> toClose;
+        synchronized (this) {
+            // other releases may have filled the free partitioners during the merge
+            retainTarget = closed || free.size() < maxFree;
+            if (retainTarget) {
+                free.add(target);
+            }
+            outstanding--;
+            toClose = takeFreeIfDone();
+        }
+        if (!retainTarget) {
+            target.close();
+        }
+        closeSafely(toClose);
         return metrics;
+    }
+
+    private synchronized AutoCloseable[] takeFreeAfterFailedRelease()
+    {
+        outstanding--;
+        return takeFreeIfDone().toArray(new AutoCloseable[0]);
     }
 
     public void close()
@@ -109,6 +162,15 @@ public class PagePartitionerPool
     private synchronized Collection<PagePartitioner> markClosed()
     {
         closed = true;
+        return takeFreeIfDone();
+    }
+
+    @GuardedBy("this")
+    private List<PagePartitioner> takeFreeIfDone()
+    {
+        if (!closed || outstanding > 0) {
+            return ImmutableList.of();
+        }
         List<PagePartitioner> toClose = ImmutableList.copyOf(free);
         free.clear();
         return toClose;

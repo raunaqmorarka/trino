@@ -241,6 +241,33 @@ public class PagePartitioner
         return serializer.getAndResetMetrics();
     }
 
+    /**
+     * Moves the rows buffered in {@code source} into this partitioner and enqueues the partitions that become full.
+     * Both partitioners have been prepared for release, so their buffered bytes are already reported as output.
+     */
+    void mergeFrom(PagePartitioner source)
+    {
+        long outputSizeInBytes = 0;
+        for (int partition = 0; partition < positionsAppenders.length; partition++) {
+            PositionsAppenderPageBuilder sourcePageBuilder = source.positionsAppenders[partition];
+            if (sourcePageBuilder == null || sourcePageBuilder.isEmpty()) {
+                continue;
+            }
+            PositionsAppenderPageBuilder partitionPageBuilder = getOrCreatePageBuilder(partition);
+            partitionPageBuilder.appendToOutputPartition(sourcePageBuilder.build());
+            if (partitionPageBuilder.isFull()) {
+                Page pagePartition = partitionPageBuilder.build();
+                outputSizeInBytes += pagePartition.getSizeInBytes();
+                enqueuePage(pagePartition, partition);
+            }
+        }
+        outputSizeReportedBeforeRelease += source.outputSizeReportedBeforeRelease;
+        source.outputSizeReportedBeforeRelease = 0;
+        adjustFlushedOutputSizeWithEagerlyReportedBytes(outputSizeInBytes);
+        source.updateMemoryUsage();
+        updateMemoryUsage();
+    }
+
     public void partitionPageByRow(Page page)
     {
         requireNonNull(page, "page is null");
